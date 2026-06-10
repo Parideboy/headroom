@@ -1268,9 +1268,7 @@ class AnthropicHandlerMixin:
                         optimized_tokens = tokenizer.count_messages(optimized_messages)
                         tokens_saved = max(0, original_tokens - optimized_tokens)
                         if maturation.newly_matured:
-                            transforms_applied.append(
-                                f"read_maturation:{maturation.newly_matured}"
-                            )
+                            transforms_applied.append(f"read_maturation:{maturation.newly_matured}")
                         logger.debug(
                             f"[{request_id}] read_maturation: "
                             f"holding={len(maturation.holding_msg_indices)} "
