@@ -1685,6 +1685,25 @@ class AnthropicHandlerMixin:
                 optimized_tokens = tokenizer.count_messages(body["messages"])
                 tokens_saved = max(0, original_tokens - optimized_tokens)
 
+            # Output shaping (opt-in via HEADROOM_OUTPUT_SHAPER): verbosity
+            # steering appended to the system-prompt tail + effort routing on
+            # mechanical tool_result continuations. Runs after every other
+            # body mutation so the turn classifier sees the final messages,
+            # and respects the same bypass header as compression.
+            if not _bypass:
+                from headroom.proxy.output_shaper import (
+                    OutputShaperSettings,
+                    shape_request,
+                )
+
+                _shaper_settings = OutputShaperSettings.from_env()
+                if _shaper_settings.enabled:
+                    shape_result = shape_request(body, _shaper_settings)
+                    if shape_result.changed:
+                        body_mutation_tracker.mark_mutated("output_shaper")
+                        transforms_applied.extend(shape_result.labels or [])
+                        logger.info(f"[{request_id}] OutputShaper: {shape_result.labels}")
+
             # Unit 2: mark end of pre-upstream phase. Everything after this
             # point is upstream I/O or post-response bookkeeping.
             stage_timer.record(
