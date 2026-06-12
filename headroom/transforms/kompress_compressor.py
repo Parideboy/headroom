@@ -864,8 +864,9 @@ class KompressCompressor(Transform):
         multiple seconds (seen with degraded ONNX runtimes on Windows) can
         never finish real compression inside the proxy's stage timeout, so
         Kompress fail-safes to passthrough once the probe verdict lands. The
-        probe must NOT run inline — preload blocks proxy startup just like the
-        download does. Until the verdict, the per-call acquire/budget bounds
+        probe must NOT run inline — preload blocks proxy startup (the HTTP
+        server binds after it), and on slow hardware the probe itself takes
+        tens of seconds. Until the verdict, the per-call acquire/budget bounds
         keep any slow inference from wedging requests.
         """
 

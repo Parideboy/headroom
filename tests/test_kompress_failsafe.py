@@ -91,7 +91,9 @@ def _make_compressor(monkeypatch, model: FakeModel, **config_kwargs) -> Kompress
     config_kwargs.setdefault("enable_ccr", False)
     compressor = KompressCompressor(config=KompressConfig(**config_kwargs))
     monkeypatch.setattr(
-        kc, "_load_kompress", lambda model_id, device="auto": (model, FakeTokenizer(), "onnx")
+        kc,
+        "_load_kompress",
+        lambda model_id, device="auto", **kwargs: (model, FakeTokenizer(), "onnx"),
     )
     return compressor
 
@@ -245,6 +247,12 @@ def test_time_budget_batch_keeps_completed_texts(monkeypatch):
 # ── Preload canary: detect degraded runtimes before live traffic ──────
 
 
+def _join_canary(compressor: KompressCompressor) -> None:
+    assert compressor._canary_thread is not None
+    compressor._canary_thread.join(timeout=10)
+    assert not compressor._canary_thread.is_alive()
+
+
 def test_canary_disables_kompress_on_slow_inference(monkeypatch, caplog):
     monkeypatch.setenv(KOMPRESS_CANARY_THRESHOLD_ENV, "0.05")
     model = FakeModel(delay=0.15)
@@ -252,6 +260,7 @@ def test_canary_disables_kompress_on_slow_inference(monkeypatch, caplog):
 
     with caplog.at_level("WARNING"):
         backend = compressor.preload()
+        _join_canary(compressor)
 
     assert backend == "onnx"
     assert compressor._degraded_reason is not None
@@ -273,6 +282,7 @@ def test_canary_fast_inference_stays_enabled(monkeypatch):
     compressor = _make_compressor(monkeypatch, model)
 
     compressor.preload()
+    _join_canary(compressor)
 
     assert compressor._degraded_reason is None
     result = compressor.compress(CONTENT_40_WORDS)
@@ -293,6 +303,7 @@ def test_canary_retry_forgives_oneoff_warmup_slowness(monkeypatch):
     model = WarmupModel()
     compressor = _make_compressor(monkeypatch, model)
     compressor.preload()
+    _join_canary(compressor)
 
     assert compressor._degraded_reason is None
     assert model.calls == 2
@@ -305,8 +316,26 @@ def test_canary_disabled_via_env(monkeypatch):
 
     compressor.preload()
 
+    assert compressor._canary_thread is None  # probe never scheduled
     assert model.calls == 0
     assert compressor._degraded_reason is None
+
+
+def test_preload_does_not_block_on_slow_canary(monkeypatch):
+    """The probe runs off the startup path: preload blocks proxy boot (the
+    HTTP server binds after it), and a slow probe once pushed the wrap-e2e
+    container past its 30s health-check timeout."""
+    monkeypatch.setenv(KOMPRESS_CANARY_THRESHOLD_ENV, "0.05")
+    model = FakeModel(delay=1.0)
+    compressor = _make_compressor(monkeypatch, model)
+
+    started = time.monotonic()
+    compressor.preload()
+    preload_elapsed = time.monotonic() - started
+
+    assert preload_elapsed < 0.5  # returns before the ~2s of probe inference
+    _join_canary(compressor)
+    assert compressor._degraded_reason is not None
 
 
 def test_canary_probe_error_never_breaks_preload(monkeypatch):
@@ -317,4 +346,5 @@ def test_canary_probe_error_never_breaks_preload(monkeypatch):
     compressor = _make_compressor(monkeypatch, ExplodingModel())
 
     assert compressor.preload() == "onnx"
+    _join_canary(compressor)
     assert compressor._degraded_reason is None
