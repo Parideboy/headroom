@@ -132,6 +132,58 @@ class OutputShaperSettings:
         )
 
 
+def resolve_verbosity_level(settings: OutputShaperSettings) -> tuple[int, str]:
+    """Resolve the live verbosity level and its source.
+
+    Precedence:
+      1. ``HEADROOM_VERBOSITY_LEVEL`` set explicitly → manual override.
+      2. AIMD controller state (when ``HEADROOM_VERBOSITY_AUTOTUNE`` is on).
+      3. Learned ``verbosity.json`` from ``learn --verbosity``.
+      4. The settings default.
+
+    Returns ``(level, source)``. Kept separate from :func:`shape_request` so the
+    body-mutating core stays a pure function of an explicit level.
+    """
+    import os
+
+    if os.environ.get("HEADROOM_VERBOSITY_LEVEL"):
+        return settings.verbosity_level, "env"
+
+    try:
+        from ..paths import workspace_dir
+
+        ws = workspace_dir()
+    except Exception:
+        return settings.verbosity_level, "default"
+
+    autotune = os.environ.get("HEADROOM_VERBOSITY_AUTOTUNE", "").lower() in ("1", "true", "yes")
+    if autotune:
+        ctrl_path = ws / "verbosity_controller.json"
+        if ctrl_path.exists():
+            try:
+                import json as _json
+
+                level = int(
+                    _json.loads(ctrl_path.read_text()).get("level", settings.verbosity_level)
+                )
+                return max(0, min(4, level)), "controller"
+            except (OSError, ValueError):
+                pass
+
+    prof_path = ws / "verbosity.json"
+    if prof_path.exists():
+        try:
+            import json as _json
+
+            level = int(_json.loads(prof_path.read_text()).get("verbosity_level", -1))
+            if 0 <= level <= 4:
+                return level, "learned"
+        except (OSError, ValueError):
+            pass
+
+    return settings.verbosity_level, "default"
+
+
 @dataclass
 class ShapeResult:
     """What the shaper did to a request body."""
@@ -277,8 +329,14 @@ def route_effort(
 def shape_request(
     body: dict[str, Any],
     settings: OutputShaperSettings | None = None,
+    level_override: int | None = None,
 ) -> ShapeResult:
-    """Apply all output-shaping levers to an Anthropic request body in place."""
+    """Apply all output-shaping levers to an Anthropic request body in place.
+
+    ``level_override`` supersedes ``settings.verbosity_level`` when given — the
+    handler passes the level resolved by :func:`resolve_verbosity_level` (learned
+    profile / controller / env) so the body-mutating core stays level-agnostic.
+    """
     if settings is None:
         settings = OutputShaperSettings.from_env()
     result = ShapeResult()
@@ -287,9 +345,10 @@ def shape_request(
 
     assert result.labels is not None  # __post_init__ guarantees this
 
-    if settings.verbosity_level > 0 and apply_verbosity_steering(body, settings.verbosity_level):
+    level = settings.verbosity_level if level_override is None else level_override
+    if level > 0 and apply_verbosity_steering(body, level):
         result.changed = True
-        result.labels.append(f"output_shaper:verbosity:L{settings.verbosity_level}")
+        result.labels.append(f"output_shaper:verbosity:L{level}")
 
     if settings.effort_router_enabled:
         kind = classify_turn(body.get("messages", []))

@@ -2168,6 +2168,30 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         persistent_savings = m.savings_tracker.stats_preview()
         display_session = persistent_savings.get("display_session", {})
 
+        # Output-side reduction (counterfactual estimate from the shaper's
+        # ledger). Distinct from input compression above: these are OUTPUT
+        # tokens the model didn't emit because we steered verbosity / routed
+        # effort down. Always labelled estimated-vs-measured + a CI so it's
+        # never mistaken for an exact count. Best-effort — never break /stats.
+        output_reduction: dict[str, Any] = {"available": False}
+        try:
+            from headroom.proxy.output_savings import get_recorder
+
+            _oest = get_recorder().estimate()
+            if _oest.n_requests > 0:
+                output_reduction = {
+                    "available": True,
+                    "method": _oest.kind,  # "measured" | "estimated"
+                    "tokens_saved": round(_oest.tokens_saved),
+                    "baseline_tokens": round(_oest.baseline_tokens),
+                    "reduction_percent": round(_oest.pct, 1),
+                    "ci_low_percent": round(_oest.ci_low_pct, 1),
+                    "ci_high_percent": round(_oest.ci_high_pct, 1),
+                    "requests": _oest.n_requests,
+                }
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         return {
             "summary": summary,
             "savings": {
@@ -2223,6 +2247,15 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                             "baseline caching is provider-native."
                         ),
                     },
+                    "output_shaping": {
+                        **output_reduction,
+                        "description": (
+                            "OUTPUT tokens the model didn't emit because the shaper "
+                            "steered verbosity / routed effort down. Counterfactual — "
+                            "shown as an estimate (vs a learned baseline) or measured "
+                            "(A/B holdout), always with a confidence band."
+                        ),
+                    },
                 },
             },
             "requests": {
@@ -2237,6 +2270,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             "tokens": {
                 "input": m.tokens_input_total,
                 "output": m.tokens_output_total,
+                "output_saved": output_reduction.get("tokens_saved", 0),
+                "output_reduction_percent": output_reduction.get("reduction_percent", 0),
+                "output_reduction": output_reduction,
                 "saved": all_layers_tokens_saved,
                 "proxy_compression_saved": proxy_compression_tokens,
                 "cli_filtering_saved": cli_tokens_avoided,
