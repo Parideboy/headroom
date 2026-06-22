@@ -155,7 +155,6 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     env:
-      HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v6
