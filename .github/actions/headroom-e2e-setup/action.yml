@@ -39,6 +39,21 @@ runs:
       with:
         workspaces: ". -> target"
 
+    # macos-latest (macos-15) ships Xcode 26.5 with clang 21, which moved the
+    # clang_rt.osx library. Pin to Xcode 16.x so the cc linker crate finds it.
+    - name: Select Xcode for clang_rt (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        for ver in 16.2 16.1 16.0; do
+          app="/Applications/Xcode_${ver}.app"
+          if [ -d "$app" ]; then
+            sudo xcode-select -s "$app"
+            echo "Using Xcode: $app"
+            break
+          fi
+        done
+
     - name: Install headroom (editable, with proxy extras — builds Rust extension)
       shell: bash
       run: |
