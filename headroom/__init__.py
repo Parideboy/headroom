@@ -83,7 +83,7 @@ from ._version import __version__  # noqa: F401
 # ~microseconds. See `headroom/_ort.py` for the full story.
 ensure_ort_dylib_pinned()
 
-from .compress import CompressConfig, CompressResult, compress  # noqa: E402
+from .compress import CompressConfig, CompressResult, compress, compress_spreadsheet  # noqa: E402
 
 # Keep a real callable bound for the one-function compression API so
 # `from headroom import compress` is never shadowed by the submodule object.
