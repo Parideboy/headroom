@@ -896,6 +896,8 @@ def _register_cbm_mcp_server(cbm_bin: str) -> None:
         [claude_cli, "mcp", "get", _CBM_MCP_SERVER_NAME],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if check.returncode == 0:
         return  # Already registered
@@ -904,6 +906,8 @@ def _register_cbm_mcp_server(cbm_bin: str) -> None:
         [claude_cli, "mcp", "add", _CBM_MCP_SERVER_NAME, "-s", "user", "--", cbm_bin],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode == 0:
         click.echo(f"  Code graph: registered {_CBM_MCP_SERVER_NAME} MCP server")
@@ -957,6 +961,8 @@ def _setup_code_graph(verbose: bool = False) -> bool:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode == 0:
@@ -3148,6 +3154,8 @@ def claude(
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if sync_result.returncode == 0 and sync_result.stdout.strip():

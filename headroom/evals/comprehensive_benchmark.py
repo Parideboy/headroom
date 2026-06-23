@@ -276,6 +276,8 @@ def run_lm_eval(
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
     duration = time.time() - start_time

@@ -115,6 +115,8 @@ def _is_musl() -> bool:
             ["ldd", "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
             check=False,
         )

@@ -181,6 +181,8 @@ def mcp_uninstall() -> None:
                 [claude_cli, "mcp", "remove", "headroom", "-s", "user"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if rm.returncode == 0:
                 click.echo("✓ Headroom MCP server removed (via claude mcp remove)")
@@ -202,6 +204,8 @@ def mcp_uninstall() -> None:
                 [claude_cli, "mcp", "remove", "codebase-memory-mcp", "-s", "user"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if cbm_rm.returncode == 0:
                 click.echo("✓ codebase-memory-mcp MCP server removed")

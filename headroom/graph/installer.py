@@ -101,6 +101,8 @@ def download_cbm(version: str | None = None) -> Path:
             [str(target_path), "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0:

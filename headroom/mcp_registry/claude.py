@@ -95,6 +95,8 @@ class ClaudeRegistrar(MCPRegistrar):
                 [str(self._claude_cli), "mcp", "remove", server_name, "-s", "user"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if result.returncode == 0:
                 return True
@@ -116,7 +118,9 @@ class ClaudeRegistrar(MCPRegistrar):
             cmd += ["-e", f"{k}={v}"]
         cmd += ["--", spec.command, *spec.args]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         if result.returncode == 0:
             return RegisterResult(RegisterStatus.REGISTERED, "via `claude mcp add` (scope: user)")
         # CLI failed — try the file fallback rather than giving up.

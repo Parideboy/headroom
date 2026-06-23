@@ -219,6 +219,8 @@ class MemoryBudgetManager:
                 ["git", "ls-files"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=self._project_path,
                 timeout=5,
             )

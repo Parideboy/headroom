@@ -1185,6 +1185,8 @@ def _read_rtk_lifetime_stats() -> dict[str, Any] | None:
             _rtk_gain_command(rtk_path, scope),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -1246,6 +1248,8 @@ def _read_lean_ctx_lifetime_stats() -> dict[str, Any] | None:
             [str(lean_ctx_path), "gain", "--json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode != 0 or not result.stdout.strip():

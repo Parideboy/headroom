@@ -98,6 +98,8 @@ def _apply_windows_env_scope(manifest: DeploymentManifest) -> list[ManagedMutati
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         ).stdout.strip()
         command = [

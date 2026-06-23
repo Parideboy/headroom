@@ -282,7 +282,13 @@ def start_persistent_docker(manifest: DeploymentManifest) -> None:
         manifest.container_name,
         *command[5:],  # drop initial `docker run --rm --name ...`
     ]
-    subprocess.run(["docker", "rm", "-f", manifest.container_name], capture_output=True, text=True)
+    subprocess.run(
+        ["docker", "rm", "-f", manifest.container_name],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     subprocess.run(docker_cmd, check=True)
 
 
@@ -290,9 +296,19 @@ def stop_runtime(manifest: DeploymentManifest) -> None:
     """Stop the raw runtime for the deployment."""
 
     if manifest.preset == InstallPreset.PERSISTENT_DOCKER.value:
-        subprocess.run(["docker", "stop", manifest.container_name], capture_output=True, text=True)
         subprocess.run(
-            ["docker", "rm", "-f", manifest.container_name], capture_output=True, text=True
+            ["docker", "stop", manifest.container_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", manifest.container_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return
 
@@ -321,7 +337,11 @@ def runtime_status(manifest: DeploymentManifest) -> str:
 
     if manifest.preset == InstallPreset.PERSISTENT_DOCKER.value:
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if manifest.container_name in result.stdout.splitlines():
             return "running"
