@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- The Headroom dashboard no longer tunnels `GET /favicon.ico` to the wrapped
+  upstream provider. No route matched that path, so it fell through to the
+  proxy's catch-all passthrough route and was forwarded to the configured
+  Anthropic/OpenAI/etc. backend — burning a real upstream request (and
+  possibly failing auth) for a browser's automatic favicon fetch on
+  `/dashboard`. A dedicated `/favicon.ico` route now answers with `204 No
+  Content` directly, registered ahead of the passthrough catch-all (#1787).
 - `headroom wrap claude` no longer leaves a dead `ANTHROPIC_BASE_URL` in a
   project's `.claude/settings.local.json` after an unclean exit (`SIGKILL`,
   OOM, reboot, or terminal/tmux close via `SIGHUP`, which was not caught).
