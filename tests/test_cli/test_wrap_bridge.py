@@ -155,12 +155,35 @@ def test_wrap_aider_prepare_only_injects_conventions(monkeypatch, tmp_path: Path
         assert "headroom:rtk-instructions" in conventions.read_text(encoding="utf-8")
 
 
-def test_wrap_cursor_prepare_only_injects_cursorrules(monkeypatch, tmp_path: Path) -> None:
+def test_wrap_cursor_prepare_only_registers_native_hook(monkeypatch, tmp_path: Path) -> None:
+    # GH #756: when rtk's own `--agent cursor` hook registers successfully,
+    # headroom must not also inject RTK_INSTRUCTIONS_BLOCK into .cursorrules.
     _set_test_home(monkeypatch, tmp_path)
     runner = CliRunner()
 
     with runner.isolated_filesystem(temp_dir=str(tmp_path)):
-        with patch("headroom.cli.wrap._ensure_rtk_binary", return_value=Path("rtk")):
+        with (
+            patch("headroom.cli.wrap._ensure_rtk_binary", return_value=Path("rtk")),
+            patch("headroom.rtk.installer.register_agent_hooks", return_value=True) as register,
+        ):
+            result = runner.invoke(main, ["wrap", "cursor", "--prepare-only"])
+
+        assert result.exit_code == 0, result.output
+        register.assert_called_once_with(Path("rtk"), agent="cursor")
+        assert not Path(".cursorrules").exists()
+
+
+def test_wrap_cursor_prepare_only_falls_back_to_cursorrules_when_hook_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _set_test_home(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    with runner.isolated_filesystem(temp_dir=str(tmp_path)):
+        with (
+            patch("headroom.cli.wrap._ensure_rtk_binary", return_value=Path("rtk")),
+            patch("headroom.rtk.installer.register_agent_hooks", return_value=False),
+        ):
             result = runner.invoke(main, ["wrap", "cursor", "--prepare-only"])
 
         assert result.exit_code == 0, result.output

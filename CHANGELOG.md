@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `headroom wrap cursor` no longer injects the `rtk` custom-instructions
+  block into `.cursorrules` when rtk's own native Cursor hook registers
+  successfully. rtk supports a real hook for Cursor via
+  `rtk init --agent cursor` (the same mechanism headroom already uses for
+  Claude Code), which rewrites shell commands transparently — the injected
+  `.cursorrules` text duplicated that guidance for no benefit. `wrap cursor`
+  now tries the native hook first and only falls back to injecting
+  `.cursorrules` if hook registration fails (#756).
 - `headroom wrap claude` no longer leaves a dead `ANTHROPIC_BASE_URL` in a
   project's `.claude/settings.local.json` after an unclean exit (`SIGKILL`,
   OOM, reboot, or terminal/tmux close via `SIGHUP`, which was not caught).
