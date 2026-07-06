@@ -161,10 +161,18 @@ def test_wrap_cursor_prepare_only_registers_native_hook(monkeypatch, tmp_path: P
     _set_test_home(monkeypatch, tmp_path)
     runner = CliRunner()
 
+    # headroom trusts the on-disk hook, not rtk's exit code, so simulate rtk
+    # actually writing ~/.cursor/hooks.json when registration succeeds.
+    def _register(_rtk_path, *, agent):
+        hooks = tmp_path / ".cursor" / "hooks.json"
+        hooks.parent.mkdir(parents=True, exist_ok=True)
+        hooks.write_text('{"hooks": {"preToolUse": [{"command": "rtk hook cursor"}]}}')
+        return True
+
     with runner.isolated_filesystem(temp_dir=str(tmp_path)):
         with (
             patch("headroom.cli.wrap._ensure_rtk_binary", return_value=Path("rtk")),
-            patch("headroom.rtk.installer.register_agent_hooks", return_value=True) as register,
+            patch("headroom.rtk.installer.register_agent_hooks", side_effect=_register) as register,
         ):
             result = runner.invoke(main, ["wrap", "cursor", "--prepare-only"])
 

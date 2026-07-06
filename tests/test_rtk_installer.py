@@ -74,9 +74,7 @@ def test_register_claude_hooks_survives_forked_daemon(tmp_path: Path) -> None:
     assert installer.register_claude_hooks(fake_rtk) is True
 
 
-def test_register_agent_hooks_passes_agent_flag_for_non_claude(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_register_agent_hooks_passes_agent_flag_for_non_claude(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
     class FakeResult:

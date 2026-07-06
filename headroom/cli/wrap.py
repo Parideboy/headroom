@@ -4809,7 +4809,12 @@ def cursor(
             nonlocal cursor_hook_registered
             from headroom.rtk.installer import register_agent_hooks
 
-            if register_agent_hooks(rtk_path, agent="cursor"):
+            # rtk may exit 0 without writing hooks.json (e.g. an rtk build that
+            # doesn't support --agent cursor), so trust the file, not the exit
+            # code: only skip the .cursorrules fallback if the native hook is
+            # actually on disk (GH #756).
+            cursor_hooks_json = Path.home() / ".cursor" / "hooks.json"
+            if register_agent_hooks(rtk_path, agent="cursor") and cursor_hooks_json.is_file():
                 cursor_hook_registered = True
             else:
                 _inject_rtk_instructions(cast(Path, cursorrules), verbose=verbose)
