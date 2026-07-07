@@ -112,6 +112,123 @@ class CacheMissAttribution:
     ttl_exceeded: bool = False
 
 
+def _strip_cache_control(obj: Any) -> Any:
+    """Recursively drop ``cache_control`` for content-only equality checks.
+
+    Clients (notably Claude Code) move the cache_control breakpoint to the newest
+    message on every call, so the exact same message carries cache_control on one
+    turn and not the next. That per-call annotation must be ignored when deciding
+    whether this turn append-only-extends the previous one — otherwise a moved
+    marker spuriously fails the check and we skip the byte-identical replay,
+    busting the cache."""
+    if isinstance(obj, dict):
+        return {k: _strip_cache_control(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [_strip_cache_control(v) for v in obj]
+    return obj
+
+
+def overlay_cached_prefix(
+    optimized_messages: list[dict[str, Any]],
+    current_original_messages: list[dict[str, Any]],
+    previous_original_messages: list[dict[str, Any]] | None,
+    previous_forwarded_messages: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Replay the previously-forwarded (cached, compressed) prefix byte-identical.
+
+    Provider-agnostic cache-safety guard for the freeze path. When a message is
+    "frozen", the compression pipeline may emit the agent's ORIGINAL bytes for
+    it — but the provider cached whatever we FORWARDED last turn (the compressed
+    form). Forwarding the original then mismatches the cached prefix and busts
+    the prompt cache from that point (100% of observed misses were this
+    ``prefix_change``). This overlays the exact previously-forwarded prefix onto
+    the corresponding leading messages so the forwarded prefix stays byte-for-byte
+    what the provider hashed for its cache key.
+
+    Safe only when this turn append-only-extends the previous turn (the standard
+    growing-conversation shape): the previous ORIGINAL messages must be an exact
+    prefix of the current ORIGINAL messages, and there is exactly one forwarded
+    message per original. Otherwise the previous forwarded bytes may not
+    correspond to the same positions, so we return ``optimized_messages``
+    unchanged (accept a possible bust rather than forward wrong content).
+
+    This makes freezing byte-identical in BOTH proxy modes, so the only remaining
+    difference between them is how large a mutable (still-compressible) tail each
+    leaves — not whether the frozen prefix busts the cache.
+    """
+    prev_orig = previous_original_messages
+    prev_fwd = previous_forwarded_messages
+    if not prev_orig or not prev_fwd:
+        return optimized_messages
+    n = len(prev_orig)
+    # One forwarded message per original, and the frozen prefix must fit within
+    # both the current originals and this turn's optimized output.
+    if len(prev_fwd) != n:
+        return optimized_messages
+    if len(current_original_messages) < n or len(optimized_messages) < n:
+        return optimized_messages
+    # Append-only guard on CONTENT ONLY: the frozen region must be the same
+    # messages we cached. Compare with cache_control stripped — clients move that
+    # breakpoint to the newest message each turn, so a raw dict compare would
+    # spuriously fail whenever a marker lands in the frozen prefix, skip the
+    # replay, and bust the cache (the residual busts observed after the first
+    # fix). Content stability is what the provider's prefix cache actually keys on.
+    if _strip_cache_control(current_original_messages[:n]) != _strip_cache_control(prev_orig):
+        return optimized_messages
+    # Replay the cached (compressed) prefix byte-identical; keep this turn's tail.
+    return list(prev_fwd) + list(optimized_messages[n:])
+
+
+def normalize_message_cache_control(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Own message-level cache_control placement so breakpoints stay bounded.
+
+    Two forces pile up cache_control markers turn over turn: clients move the
+    breakpoint to the newest message each call, and ``overlay_cached_prefix``
+    replays the markers that rode on each turn's then-newest message. Anthropic
+    hard-errors at **>4 cache_control blocks total** (system + tools + messages),
+    so on a long conversation the accumulation eventually 400s.
+
+    Fix: strip EVERY message-level cache_control and re-place a **single**
+    ephemeral breakpoint on the last block of the last block-style message. One
+    breakpoint caches the whole message prefix up to it, and — because the
+    provider's cache key is message CONTENT, not marker presence (moving the
+    breakpoint forward is the documented client pattern and it hits) — stripping
+    and re-placing markers never busts. system/tools breakpoints live outside
+    ``messages`` and are left untouched (they still count toward the 4 limit, so
+    holding messages to one breakpoint leaves room for them).
+
+    Only block-style (list) content can carry cache_control; string content is
+    left as-is. Returns the input unchanged when there is nothing to normalize.
+    """
+    changed = False
+    out: list[dict[str, Any]] = []
+    last_block_idx = -1
+    for i, msg in enumerate(messages):
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            had = any(isinstance(b, dict) and "cache_control" in b for b in content)
+            stripped = [
+                {k: v for k, v in b.items() if k != "cache_control"} if isinstance(b, dict) else b
+                for b in content
+            ]
+            out.append({**msg, "content": stripped} if had else msg)
+            changed = changed or had
+            if stripped and isinstance(stripped[-1], dict):
+                last_block_idx = i
+        else:
+            out.append(msg)
+    # Re-place exactly one breakpoint on the last block-style message.
+    if last_block_idx >= 0:
+        msg = out[last_block_idx]
+        content = list(msg["content"])
+        content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+        out[last_block_idx] = {**msg, "content": content}
+        changed = True
+    return out if changed else messages
+
+
 class PrefixCacheTracker:
     """Tracks provider prefix cache state across turns in a session.
 

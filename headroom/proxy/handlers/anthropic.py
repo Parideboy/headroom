@@ -41,6 +41,48 @@ logger = logging.getLogger("headroom.proxy")
 class AnthropicHandlerMixin:
     """Mixin providing Anthropic API handler methods for HeadroomProxy."""
 
+    async def _count_tokens_offloaded(self, model, messages):  # noqa: ANN001, ANN201
+        """Resolve a tokenizer and count messages off the event loop.
+
+        Tokenizer resolution can be expensive on first use (HuggingFace
+        backends may download vocab files) and counting a full Claude Code
+        conversation is CPU-bound, so both run on the compression executor
+        bounded by ``COMPRESSION_TIMEOUT_SECONDS`` (GH #1701: an unbounded
+        on-loop load froze the whole server). On timeout or error this
+        fails open to character-based estimation.
+
+        Returns:
+            Tuple of ``(tokenizer, token_count)``. The tokenizer is fully
+            initialized, so later ``count_messages`` calls on it are pure
+            CPU work.
+        """
+        from headroom.proxy.helpers import COMPRESSION_TIMEOUT_SECONDS
+        from headroom.tokenizers import EstimatingTokenCounter, get_tokenizer
+
+        def _resolve_and_count():  # noqa: ANN202
+            tokenizer = get_tokenizer(model)
+            return tokenizer, tokenizer.count_messages(messages)
+
+        try:
+            return await self._run_compression_in_executor(
+                _resolve_and_count,
+                timeout=float(COMPRESSION_TIMEOUT_SECONDS),
+            )
+        except Exception as e:  # fail open — includes asyncio.TimeoutError
+            # Log the downgrade once per model, not per request.
+            fallback_models = getattr(self, "_token_count_fallback_models", None)
+            if fallback_models is None:
+                fallback_models = set()
+                self._token_count_fallback_models = fallback_models
+            if model not in fallback_models:
+                fallback_models.add(model)
+                logger.warning(
+                    f"Token counting for model {model} failed or timed out "
+                    f"({e.__class__.__name__}); falling back to estimation"
+                )
+            estimator = EstimatingTokenCounter()
+            return estimator, estimator.count_messages(messages)
+
     @staticmethod
     def _resolve_ccr_workspace(
         request: Any,
@@ -469,7 +511,6 @@ class AnthropicHandlerMixin:
             read_request_json_with_bytes,
         )
         from headroom.proxy.modes import is_cache_mode, is_token_mode
-        from headroom.tokenizers import get_tokenizer
         from headroom.utils import extract_user_query
 
         start_time = time.time()
@@ -899,9 +940,10 @@ class AnthropicHandlerMixin:
                         media_type="application/json",
                     )
 
-            # Count original tokens
-            tokenizer = get_tokenizer(model)
-            original_tokens = tokenizer.count_messages(messages)
+            # Count original tokens off the event loop: first-use tokenizer
+            # resolution may hit the network (HF download) and counting a full
+            # conversation is CPU-bound — on-loop it froze the server (#1701).
+            tokenizer, original_tokens = await self._count_tokens_offloaded(model, messages)
 
             # Enterprise Security: scan request before compression
             _security_ctx = None
@@ -1164,7 +1206,9 @@ class AnthropicHandlerMixin:
                             )
                         if skip_ccr_request_compression:
                             optimized_messages = messages
-                            optimized_tokens = tokenizer.count_messages(optimized_messages)
+                            _, optimized_tokens = await self._count_tokens_offloaded(
+                                model, optimized_messages
+                            )
                         else:
                             # Zone 1: Swap cached compressed versions into working copy
                             working_messages = comp_cache.apply_cached(messages)
@@ -1338,6 +1382,40 @@ class AnthropicHandlerMixin:
                     logger.warning(f"[{request_id}] Optimization failed: {type(e).__name__}: {e}")
                     # Flag compression failure for observability
                     _compression_failed = True
+
+            # Cache-safety (ALL modes): forward the previously-cached (compressed)
+            # prefix byte-identical. The freeze path can emit the agent's ORIGINAL
+            # bytes for a frozen message, but the provider cached whatever we
+            # FORWARDED last turn (the compressed form); forwarding original then
+            # mismatches the cached prefix and busts it (prefix_change was 100% of
+            # observed misses, ~56% of all cache-writes). Replaying the exact
+            # previously-forwarded prefix keeps it byte-identical → cache hits.
+            # Append-only-guarded and idempotent (cache mode already replays), so
+            # it is safe to run unconditionally here.
+            from headroom.cache.prefix_tracker import (
+                normalize_message_cache_control,
+                overlay_cached_prefix,
+            )
+
+            _ov = overlay_cached_prefix(
+                optimized_messages,
+                original_client_messages,
+                prefix_tracker.get_last_original_messages(),
+                prefix_tracker.get_last_forwarded_messages(),
+            )
+            if _ov != optimized_messages:
+                optimized_messages = _ov
+                optimized_tokens = tokenizer.count_messages(optimized_messages)
+
+            # Own cache_control placement: the client moves the breakpoint each
+            # turn and the overlay replays past markers, so they accumulate ~1/turn
+            # and Anthropic hard-errors at >4. Strip message-level markers and keep
+            # a single breakpoint on the last block (caches the whole prefix;
+            # content-keyed cache so re-placing never busts). Applied last so the
+            # forwarded AND recorded (next_forwarded) messages stay bounded.
+            _norm = normalize_message_cache_control(optimized_messages)
+            if _norm is not optimized_messages:
+                optimized_messages = _norm
 
             # Guard: if "optimization" inflated tokens, revert to originals.
             # Skip in cache mode where prefix-stability may legitimately shift counts.
@@ -1553,12 +1631,27 @@ class AnthropicHandlerMixin:
                 # no-op and the cache is unaffected.
                 # ponytail: ceiling is one extra cache miss on the first CCR
                 # turn in a frozen-prefix session.
-                from headroom.proxy.helpers import should_inject_ccr_tool
+                from headroom.proxy.helpers import (
+                    has_new_ccr_markers,
+                    should_inject_ccr_tool,
+                )
+
+                # #1850: only markers NEW this turn justify overriding the
+                # injection deferral (#1006). Markers replayed from the
+                # previously-forwarded prefix (overlay_cached_prefix) are
+                # historical — counting them would re-inject the tool on every
+                # frozen turn and bust the *tools* cache segment, undoing the
+                # overlay's messages-prefix cache-safety.
+                has_new_compressed_content = has_new_ccr_markers(
+                    current_detected_hashes=injector.detected_hashes,
+                    previous_forwarded_messages=prefix_tracker.get_last_forwarded_messages(),
+                    provider="anthropic",
+                )
 
                 should_inject, is_marker_override = should_inject_ccr_tool(
                     configured_inject_tool=configured_inject_tool,
                     frozen_message_count=frozen_message_count,
-                    has_compressed_content=injector.has_compressed_content,
+                    has_compressed_content=has_new_compressed_content,
                 )
                 if should_inject:
                     if is_marker_override:
@@ -1575,7 +1668,7 @@ class AnthropicHandlerMixin:
                         session_id=session_id,
                         request_id=request_id,
                         existing_tools=tools,
-                        has_compressed_content_this_turn=injector.has_compressed_content,
+                        has_compressed_content_this_turn=has_new_compressed_content,
                     )
                     if ccr_tool_injected:
                         logger.debug(
@@ -2985,7 +3078,6 @@ class AnthropicHandlerMixin:
         from headroom.ccr import CCRToolInjector
         from headroom.proxy.helpers import MAX_REQUEST_BODY_SIZE, _read_request_json
         from headroom.proxy.modes import is_cache_mode
-        from headroom.tokenizers import get_tokenizer
         from headroom.utils import extract_user_query
 
         start_time = time.time()
@@ -3093,17 +3185,27 @@ class AnthropicHandlerMixin:
                 )
                 if is_cache_mode(self.config.mode):
                     optimized_messages = messages
-                    original_tokens = get_tokenizer(model).count_messages(messages)
+                    _, original_tokens = await self._count_tokens_offloaded(model, messages)
                     optimized_tokens = original_tokens
                 else:
-                    result = self.anthropic_pipeline.apply(
-                        messages=messages,
-                        model=model,
-                        model_limit=context_limit,
-                        context=extract_user_query(messages),
-                        frozen_message_count=frozen_message_count,
-                        request_id=request_id,
-                        **proxy_pipeline_kwargs(self.config),
+                    from headroom.proxy.helpers import COMPRESSION_TIMEOUT_SECONDS
+
+                    # Offload off the event loop (#1701): an inline apply()
+                    # blocks every other request for the duration; a timeout
+                    # here is caught below and passes the item through.
+                    result = await self._run_compression_in_executor(
+                        lambda messages=messages, model=model, context_limit=context_limit, frozen_message_count=frozen_message_count: (
+                            self.anthropic_pipeline.apply(
+                                messages=messages,
+                                model=model,
+                                model_limit=context_limit,
+                                context=extract_user_query(messages),
+                                frozen_message_count=frozen_message_count,
+                                request_id=request_id,
+                                **proxy_pipeline_kwargs(self.config),
+                            )
+                        ),
+                        timeout=COMPRESSION_TIMEOUT_SECONDS,
                     )
 
                     optimized_messages = result.messages

@@ -5,10 +5,10 @@
   ██╔══██║██╔══╝  ██╔══██║██║  ██║██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║
   ██║  ██║███████╗██║  ██║██████╔╝██║  ██║╚██████╔╝╚██████╔╝██║ ╚═╝ ██║
   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝
-                  The context compression layer for AI agents
+              The context compression layer for AI agents
 </pre></div>
 
-<p align="center"><strong>60–95% fewer tokens · library · proxy · MCP · content-aware compressors · local-first · reversible</strong></p>
+<p align="center"><strong>60–95% fewer tokens (for JSON data), 15-20% fewer tokens (for coding agents) · library · proxy · MCP · content-aware compressors · local-first · reversible</strong></p>
 
 <p align="center">
   <a href="https://github.com/chopratejas/headroom/actions/workflows/ci.yml"><img src="https://github.com/chopratejas/headroom/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -104,6 +104,25 @@ headroom dashboard                      # live savings dashboard (proxy must be 
 The `headroom` CLI ships **only** via the PyPI package. The npm `headroom-ai` is the TypeScript SDK — a library you import (`import { compress } from 'headroom-ai'`), not a CLI, so it provides no `headroom` command.
 
 Granular extras: `[proxy]`, `[mcp]`, `[ml]`, `[code]`, `[memory]`, `[vector]` (optional HNSW backend — needs a C++ toolchain, not in `[all]`), `[relevance]`, `[image]`, `[agno]`, `[langchain]`, `[evals]`, `[pytorch-mps]` (Apple-GPU memory-embedder offload — set `HEADROOM_EMBEDDER_RUNTIME=pytorch_mps`). Requires **Python 3.10+**.
+
+### Codex / global install
+
+If Codex or another MCP client cannot inherit a shell `PATH` reliably, install Headroom as a persistent uv tool and point the client at the absolute binary path:
+
+```bash
+uv tool install "headroom-ai[all]"
+command -v headroom
+```
+
+Then use the returned path in MCP config:
+
+```toml
+[mcp_servers.headroom]
+command = "/absolute/path/from/command-v/headroom"
+args = ["mcp", "serve"]
+```
+
+`command = "headroom"` only works when the client starts with a `PATH` that already includes the uv tool directory.
 
 ## Proof
 
@@ -279,6 +298,7 @@ Platform support note: macOS auth reuse via Copilot CLI Keychain storage has bee
 - **Kompress-v2-base** — our HuggingFace model, trained on agentic traces.
 - **Image compression** — 40–90% reduction via trained ML router.
 - **CacheAligner** — stabilizes prefixes so Anthropic/OpenAI KV caches actually hit.
+- **Live-zone compression** — compress fresh tool output while keeping frozen prefix byte-stable.
 - **CCR** — reversible compression; LLM retrieves originals on demand.
 - **Cross-agent memory** — shared store, agent provenance, auto-dedup.
 - **SharedContext** — compressed context passing across multi-agent workflows.
@@ -380,8 +400,8 @@ winget install Rustlang.Rustup && rustup default stable
 Restart your shell, then `pip install "headroom-ai[all]"`. A prebuilt wheel avoids the Rust
 build entirely where available: `pip install --only-binary headroom-ai headroom-ai`. Prebuilt
 wheels are published for Windows (`win_amd64`), Linux (`x86_64` / `aarch64`), and macOS
-(Apple Silicon), so installs on those platforms never need a local Rust toolchain — the
-Rust-first dance above is only for the platform-independent sdist fallback (e.g. Intel macOS).
+(Apple Silicon and Intel), so installs on those platforms never need a local Rust toolchain — the
+Rust-first dance above is only for the platform-independent sdist fallback when no wheel matches.
 
 Two runtime assets are fetched over TLS; if they are blocked, trust your corporate CA via
 `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` / `CURL_CA_BUNDLE`:
@@ -450,7 +470,7 @@ Headroom runs **locally**, covers **every** content type, works with every major
 |------------------------------------------------------------------------------|------------------------------------------------|------------------------------------|:-----:|:----------:|
 | **Headroom**                                                                 | All context — tools, RAG, logs, files, history | Proxy · library · middleware · MCP | Yes   | Yes        |
 | [RTK](https://github.com/rtk-ai/rtk)                                        | CLI command outputs                            | CLI wrapper                        | Yes   | No         |
-| [lean-ctx](https://github.com/yvgude/lean-ctx)                               | CLI commands, MCP tools, editor rules          | CLI wrapper · MCP                  | Yes   | No         |
+| [lean-ctx](https://github.com/yvgude/lean-ctx)                               | Tool output, files, shell, history             | Proxy · library · middleware · MCP | Yes   | Yes        |
 | [Compresr](https://compresr.ai), [Token Co.](https://thetokencompany.ai)    | Text sent to their API                         | Hosted API call                    | No    | No         |
 | OpenAI Compaction                                                            | Conversation history                           | Provider-native                    | No    | No         |
 
