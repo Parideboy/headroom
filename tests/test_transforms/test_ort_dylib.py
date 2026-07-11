@@ -1,11 +1,10 @@
-"""Tests for headroom._ort — the ORT_DYLIB_PATH auto-pin.
+"""Tests for headroom._ort -- the ORT_DYLIB_PATH auto-pin.
 
 The resolver points the Rust core's ort-load-dynamic runtime at the pip
 onnxruntime package's shared library on every platform: on Windows it
 guards against the DLL search picking up the Windows ML System32
-onnxruntime.dll (deadlocks ort session init on Win11 24H2+), and on
-Linux/macOS it restores ML detection after static ORT linking was
-dropped for pre-AVX2 CPU compatibility (#1278). The platform is
+onnxruntime.dll, and on Linux/macOS it avoids static ORT import-time
+CPU feature faults on older x86_64 CPUs (#1278). The platform is
 monkeypatched so every branch runs on any CI OS.
 """
 
@@ -58,7 +57,7 @@ def test_pins_dylib_on_macos(monkeypatch, tmp_path):
     pkg = tmp_path / "onnxruntime"
     capi = pkg / "capi"
     capi.mkdir(parents=True)
-    dylib = capi / "libonnxruntime.dylib"
+    dylib = capi / "libonnxruntime.1.23.2.dylib"
     dylib.write_bytes(b"not really a dylib")
     _fake_spec_for(monkeypatch, pkg)
 
@@ -110,7 +109,7 @@ def test_no_pin_when_package_missing(monkeypatch):
     assert "ORT_DYLIB_PATH" not in _ort.os.environ
 
 
-def test_no_pin_when_dll_file_absent(monkeypatch, tmp_path):
+def test_no_pin_when_native_library_absent(monkeypatch, tmp_path):
     _force_windows(monkeypatch)
     pkg = tmp_path / "onnxruntime"
     pkg.mkdir()  # package exists, but no capi/onnxruntime.dll inside
