@@ -87,9 +87,9 @@ jobs:
             if [ "$waited" -ge 1200 ]; then
               echo "::group::hang diagnostics (cargo test still alive after ${waited}s)"
               sudo apt-get install -y -qq gdb >/dev/null
-              ps -eLf | grep -E 'headroom|cargo' | grep -v grep
+              pgrep -af 'headroom|cargo'
               for p in $(pgrep -f 'target/debug/deps'); do
-                echo "=== native stacks for pid $p ($(tr -d '\0' < /proc/$p/cmdline)) ==="
+                echo "=== native stacks for pid $p ($(tr -d '\0' < "/proc/$p/cmdline")) ==="
                 sudo gdb -p "$p" -batch -ex 'thread apply all bt' 2>&1 | tail -150
               done
               echo "::endgroup::"

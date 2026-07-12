@@ -258,7 +258,6 @@ jobs:
         # fail fast instead of eating the 30-min job timeout.
         run: |
           set +e
-          pip install py-spy >/dev/null
           pytest tests scripts/tests \
             --splits 4 --group ${{ matrix.shard }} \
             --cov=headroom --cov-branch \
@@ -270,10 +269,11 @@ jobs:
           while kill -0 "$TEST_PID" 2>/dev/null; do
             if [ "$waited" -ge 900 ]; then
               echo "::group::hang diagnostics (pytest still alive after ${waited}s)"
-              ps -eLf | grep -E 'py' | grep -v grep
-              for p in $(pgrep -x python || pgrep -f pytest); do
+              sudo apt-get install -y -qq gdb >/dev/null 2>&1
+              pgrep -af pytest
+              for p in $(pgrep -f 'bin/pytest'); do
                 echo "=== native stacks for pid $p ==="
-                sudo "$(command -v py-spy)" dump --native --pid "$p" 2>&1 || true
+                sudo gdb -p "$p" -batch -ex 'thread apply all bt' 2>&1 | tail -200
               done
               echo "::endgroup::"
               kill -9 "$TEST_PID" 2>/dev/null
