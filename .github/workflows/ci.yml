@@ -250,13 +250,39 @@ jobs:
       # exercised by those files — a false negative on every PR. The main
       # suite runs here; its coverage must be what codecov sees.
       - name: Run test shard ${{ matrix.shard }}/4
+        # TEMPORARY hang diagnostics (#1715): the pytest process has hung
+        # at interpreter exit after "N passed" since headroom._core moved
+        # to ort-load-dynamic. Run pytest in the background; if it is
+        # still alive 10 min after the suite normally finishes (~5 min),
+        # dump native stacks of every python process with py-spy, then
+        # fail fast instead of eating the 30-min job timeout.
         run: |
+          set +e
+          pip install py-spy >/dev/null
           pytest tests scripts/tests \
             --splits 4 --group ${{ matrix.shard }} \
             --cov=headroom --cov-branch \
             --cov-report=xml:coverage-${{ matrix.shard }}.xml \
             --cov-report= \
-            --tb=short -q
+            --tb=short -q &
+          TEST_PID=$!
+          waited=0
+          while kill -0 "$TEST_PID" 2>/dev/null; do
+            if [ "$waited" -ge 900 ]; then
+              echo "::group::hang diagnostics (pytest still alive after ${waited}s)"
+              ps -eLf | grep -E 'py' | grep -v grep
+              for p in $(pgrep -x python || pgrep -f pytest); do
+                echo "=== native stacks for pid $p ==="
+                sudo "$(command -v py-spy)" dump --native --pid "$p" 2>&1 || true
+              done
+              echo "::endgroup::"
+              kill -9 "$TEST_PID" 2>/dev/null
+              exit 1
+            fi
+            sleep 10
+            waited=$((waited + 10))
+          done
+          wait "$TEST_PID"
 
       - name: Upload coverage shard ${{ matrix.shard }} to Codecov
         uses: codecov/codecov-action@v5

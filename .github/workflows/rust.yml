@@ -54,12 +54,53 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Provide ONNX Runtime dylib
+        # headroom-core is built with `ort-load-dynamic` (see its
+        # Cargo.toml): the ONNX Runtime shared library is dlopen'd at
+        # runtime instead of statically linked, so the magika/detection
+        # tests need a real libonnxruntime.so and ORT_DYLIB_PATH pointing
+        # at it — same contract `headroom/_ort.py` fulfills for Python
+        # users via the pip `onnxruntime` package.
+        run: |
+          pip install 'onnxruntime>=1.16.0'
+          echo "ORT_DYLIB_PATH=$(python -c "import onnxruntime, pathlib; p = pathlib.Path(onnxruntime.__file__).parent / 'capi'; print(next(iter(sorted(p.glob('libonnxruntime.so*')))))")" >> "$GITHUB_ENV"
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
       - name: cargo test
-        run: cargo test --workspace
+        # TEMPORARY hang diagnostics (#1715): test binaries have hung at
+        # process exit after printing their summary since the switch to
+        # ort-load-dynamic. Run cargo test in the background; if it is
+        # still alive after 20 min, dump native stacks of every surviving
+        # test process with gdb, then fail fast instead of eating the
+        # 30-min job timeout.
+        run: |
+          set +e
+          cargo test --workspace &
+          TEST_PID=$!
+          waited=0
+          while kill -0 "$TEST_PID" 2>/dev/null; do
+            if [ "$waited" -ge 1200 ]; then
+              echo "::group::hang diagnostics (cargo test still alive after ${waited}s)"
+              sudo apt-get install -y -qq gdb >/dev/null
+              ps -eLf | grep -E 'headroom|cargo' | grep -v grep
+              for p in $(pgrep -f 'target/debug/deps'); do
+                echo "=== native stacks for pid $p ($(tr -d '\0' < /proc/$p/cmdline)) ==="
+                sudo gdb -p "$p" -batch -ex 'thread apply all bt' 2>&1 | tail -150
+              done
+              echo "::endgroup::"
+              kill -9 "$TEST_PID" 2>/dev/null
+              pkill -9 -f 'target/debug/deps' 2>/dev/null
+              exit 1
+            fi
+            sleep 10
+            waited=$((waited + 10))
+          done
+          wait "$TEST_PID"
 
   simulator-e2e:
     name: simulator e2e (${{ matrix.os }})
