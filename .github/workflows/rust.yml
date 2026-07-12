@@ -72,35 +72,7 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
       - name: cargo test
-        # TEMPORARY hang diagnostics (#1715): test binaries have hung at
-        # process exit after printing their summary since the switch to
-        # ort-load-dynamic. Run cargo test in the background; if it is
-        # still alive after 20 min, dump native stacks of every surviving
-        # test process with gdb, then fail fast instead of eating the
-        # 30-min job timeout.
-        run: |
-          set +e
-          cargo test --workspace &
-          TEST_PID=$!
-          waited=0
-          while kill -0 "$TEST_PID" 2>/dev/null; do
-            if [ "$waited" -ge 1200 ]; then
-              echo "::group::hang diagnostics (cargo test still alive after ${waited}s)"
-              sudo apt-get install -y -qq gdb >/dev/null
-              pgrep -af 'headroom|cargo'
-              for p in $(pgrep -f 'target/debug/deps'); do
-                echo "=== native stacks for pid $p ($(tr -d '\0' < "/proc/$p/cmdline")) ==="
-                sudo gdb -p "$p" -batch -ex 'thread apply all bt' 2>&1 | tail -150
-              done
-              echo "::endgroup::"
-              kill -9 "$TEST_PID" 2>/dev/null
-              pkill -9 -f 'target/debug/deps' 2>/dev/null
-              exit 1
-            fi
-            sleep 10
-            waited=$((waited + 10))
-          done
-          wait "$TEST_PID"
+        run: cargo test --workspace
 
   simulator-e2e:
     name: simulator e2e (${{ matrix.os }})
