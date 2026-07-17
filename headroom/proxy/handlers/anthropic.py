@@ -1485,11 +1485,50 @@ class AnthropicHandlerMixin:
                     else:
                         previous_original_messages = prefix_tracker.get_last_original_messages()
                         previous_forwarded_messages = prefix_tracker.get_last_forwarded_messages()
-                        delta = self._extract_cache_stable_delta(
-                            original_client_messages,
-                            previous_original_messages,
-                            previous_forwarded_messages,
-                        )
+                        if not previous_original_messages:
+                            # Session cold start: nothing has been forwarded for
+                            # this session yet, so there is no provider cache
+                            # prefix to protect — run the same full-message
+                            # compression as non-cache modes (issue #2357: the
+                            # previous silent passthrough here meant cache mode
+                            # never compressed anything until a stable delta
+                            # appeared, which for resumed 100k-token transcripts
+                            # was never). The compressed output is recorded as
+                            # the forwarded messages below, and later turns
+                            # replay that prefix byte-identically via the
+                            # stable-delta path, so append-only cache safety is
+                            # preserved.
+                            delta = None
+                            async with stage_timer.measure("compression_first_stage"):
+                                result = await self._run_compression_in_executor(
+                                    lambda: self.anthropic_pipeline.apply(
+                                        messages=messages,
+                                        model=model,
+                                        model_limit=context_limit,
+                                        context=extract_user_query(messages),
+                                        frozen_message_count=frozen_message_count,
+                                        biases=biases,
+                                        request_id=request_id,
+                                        compression_policy=compression_policy,
+                                        **proxy_pipeline_kwargs(self.config),
+                                    ),
+                                    timeout=COMPRESSION_TIMEOUT_SECONDS,
+                                )
+
+                            if result.messages != messages:
+                                optimized_messages = result.messages
+                                transforms_applied = list(result.transforms_applied) + [
+                                    "cache_mode:cold_start_full"
+                                ]
+                                pipeline_timing = result.timing
+                                original_tokens = result.tokens_before
+                                optimized_tokens = result.tokens_after
+                        else:
+                            delta = self._extract_cache_stable_delta(
+                                original_client_messages,
+                                previous_original_messages,
+                                previous_forwarded_messages,
+                            )
                         if delta is not None:
                             stable_forwarded_prefix, delta_messages = delta
                             if delta_messages:
@@ -1557,11 +1596,19 @@ class AnthropicHandlerMixin:
                             else:
                                 optimized_messages = stable_forwarded_prefix
                                 optimized_tokens = tokenizer.count_messages(optimized_messages)
-                        else:
+                        elif previous_original_messages:
                             # Conservative rule for cache mode:
                             # only replay exact stable message-prefix extensions.
                             # In-message append rewriting is deferred until we can
                             # prove it is perfectly replayable across future turns.
+                            # Tag the passthrough so the dashboard can explain 0
+                            # savings instead of silently reporting "optimization
+                            # enabled" with Before == After (issue #2357).
+                            tags["passthrough_reason"] = "cache_mode_prefix_mismatch"
+                            logger.info(
+                                "[%s] Compression skipped: reason=cache_mode_prefix_mismatch",
+                                request_id,
+                            )
                             optimized_messages = messages
                             optimized_tokens = original_tokens
 
