@@ -1138,6 +1138,9 @@ class AnthropicHandlerMixin:
                 session_id, "anthropic", messages=session_messages
             )
             frozen_message_count = prefix_tracker.get_frozen_message_count()
+            # Pre-strict-override tracker truth: >0 only when a provider cache
+            # prefix was actually confirmed (or restored) for this session.
+            tracker_frozen_count = frozen_message_count
             # Idle gap since the previous turn's response, snapshotted at fetch
             # (before get_or_create bumped the access clock). Forwarded to the
             # pipeline so the net-cost/TTL gate (HEADROOM_NET_COST_POLICY=1) can
@@ -1485,10 +1488,14 @@ class AnthropicHandlerMixin:
                     else:
                         previous_original_messages = prefix_tracker.get_last_original_messages()
                         previous_forwarded_messages = prefix_tracker.get_last_forwarded_messages()
-                        if not previous_original_messages:
+                        if not previous_original_messages and tracker_frozen_count == 0:
                             # Session cold start: nothing has been forwarded for
-                            # this session yet, so there is no provider cache
-                            # prefix to protect — run the same full-message
+                            # this session yet and no frozen prefix survives from
+                            # a prior process (frozen_message_count > 0 means a
+                            # provider cache prefix may already exist upstream —
+                            # e.g. a resumed session restored from the CCR
+                            # compression cache — so it must stay passthrough),
+                            # hence there is no provider cache prefix to protect — run the same full-message
                             # compression as non-cache modes (issue #2357: the
                             # previous silent passthrough here meant cache mode
                             # never compressed anything until a stable delta
@@ -1609,6 +1616,13 @@ class AnthropicHandlerMixin:
                                 "[%s] Compression skipped: reason=cache_mode_prefix_mismatch",
                                 request_id,
                             )
+                            optimized_messages = messages
+                            optimized_tokens = original_tokens
+                        elif tracker_frozen_count > 0:
+                            # Cold start with a frozen prefix restored from a
+                            # prior process: the provider cache may already hold
+                            # that prefix, so forward unmodified.
+                            tags["passthrough_reason"] = "cache_mode_frozen_cold_start"
                             optimized_messages = messages
                             optimized_tokens = original_tokens
 
