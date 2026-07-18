@@ -288,6 +288,19 @@ def test_inject_provider_config_with_extra_models(
     assert "claude-sonnet-4-6" in models
 
 
+def test_build_opencode_config_content_with_extra_models() -> None:
+    """build_opencode_config_content threads extra models into the headroom provider."""
+    from headroom.providers.opencode.runtime import build_opencode_config_content
+
+    _, entry = parse_extra_model_spec("deepseek-chat:DeepSeek Chat:65536")
+    config = build_opencode_config_content(
+        port=8787, include_mcp=False, include_plugin=False, extra_models={"deepseek-chat": entry}
+    )
+    models = config["provider"]["headroom"]["models"]
+    assert models["deepseek-chat"]["name"] == "DeepSeek Chat"
+    assert "claude-sonnet-4-6" in models
+
+
 # ---------------------------------------------------------------------------
 # Edge cases — JSON parsing
 # ---------------------------------------------------------------------------
