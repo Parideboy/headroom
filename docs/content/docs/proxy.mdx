@@ -359,6 +359,78 @@ headroom proxy --backend azure
 OPENROUTER_API_KEY=sk-or-... headroom proxy --backend openrouter
 ```
 
+### Google Vertex AI
+
+`--backend vertex_ai` delegates to [LiteLLM](https://docs.litellm.ai/docs/providers/vertex),
+which brings two requirements that are easy to miss:
+
+**1. Install the Vertex SDK.** `google-cloud-aiplatform` is not included in any
+Headroom extra (`[proxy]`, `[all]`, …) or Docker image variant, so install it
+alongside Headroom:
+
+```bash
+pip install "headroom-ai[proxy]" "google-cloud-aiplatform>=1.38"
+```
+
+Without it, the first Vertex request fails with
+`litellm.BadRequestError: … vertexai import failed … No module named 'vertexai'`.
+
+**2. Set the LiteLLM project/location variables.** LiteLLM reads the GCP project
+and region from `VERTEXAI_PROJECT` / `VERTEXAI_LOCATION` — these are **not** the
+standard Google Cloud variables (`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`)
+used by `gcloud` and current Google SDKs:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json  # or use ADC
+export VERTEXAI_PROJECT=<your-gcp-project>
+export VERTEXAI_LOCATION=us-central1
+
+headroom proxy --backend vertex_ai --region us-central1
+```
+
+<Callout type="warn">
+If `VERTEXAI_PROJECT` is unset, requests do not fail loudly — they can silently
+resolve against your Application Default Credentials' default quota project,
+billing a different GCP project than you intended. Set it explicitly even if
+`GOOGLE_CLOUD_PROJECT` is already exported.
+</Callout>
+
+**Backend name aliases.** `vertex_ai`, `vertex`, `google-vertex`, `googlevertex`,
+`litellm-vertex`, and `litellm-vertex_ai` are all normalized to the same
+LiteLLM-backed `vertex_ai` backend — CLI help text and older docs use these
+spellings interchangeably.
+
+Running Claude Code against Claude models on Vertex? See
+[Claude Code on Vertex AI](/docs/claude-code-vertex) for the recommended
+native Vertex-mode flow that reuses Claude Code's own GCP auth.
+
+<Callout type="info" title="Not the same as the LiteLLM callback">
+`--backend vertex_ai` runs Headroom **as a proxy that itself calls Vertex via
+LiteLLM**. The [LiteLLM integration page](/docs/litellm) documents the inverse:
+adding Headroom as a compression callback inside your own LiteLLM app. Despite
+the shared name, they are different mechanisms.
+</Callout>
+
+### Native Vertex passthrough routes
+
+Separately from `--backend vertex_ai`, the proxy always registers routes that
+mirror Vertex's native REST shape verbatim — no backend flag needed:
+
+```text
+/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:generateContent
+/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:streamGenerateContent
+/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:countTokens
+/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:rawPredict
+/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:streamRawPredict
+```
+
+Requests with `publisher=google` (Gemini models) go through Headroom's full
+Gemini optimization handler; `publisher=anthropic` (Claude on Vertex) routes
+through the same LiteLLM-Vertex path as `--backend vertex_ai`. Any client that
+already speaks the native Vertex REST API can simply point its endpoint at the
+proxy — this is the mechanism `headroom wrap claude` uses in
+[Vertex mode](/docs/claude-code-vertex).
+
 ### Bedrock via a local gateway
 
 `--backend bedrock` accepts **Anthropic** input (`/v1/messages`) and re-signs to AWS. Some setups are the other way around: the client already speaks **Bedrock** (e.g. Claude Code with `CLAUDE_CODE_USE_BEDROCK=1`, or any AWS SDK pointed at a custom endpoint), sending `POST /model/{id}/invoke` to a local gateway that re-signs and forwards to AWS (LiteLLM, LocalStack, a corporate Bedrock proxy).

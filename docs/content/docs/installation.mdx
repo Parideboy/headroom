@@ -268,6 +268,12 @@ These variables configure Headroom at runtime. Set them in your shell, `.env` fi
 | `ANTHROPIC_API_KEY` | Anthropic API key (used when proxying to Anthropic) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS credentials for Bedrock backend |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google Cloud credentials for Vertex AI backend |
+| `VERTEXAI_PROJECT` | GCP project id for the Vertex AI backend (LiteLLM-specific — distinct from `GOOGLE_CLOUD_PROJECT`; set it explicitly to avoid silently billing your ADC default quota project) |
+| `VERTEXAI_LOCATION` | GCP region for the Vertex AI backend (LiteLLM-specific — distinct from `GOOGLE_CLOUD_LOCATION`) |
+
+The Vertex AI backend also requires `google-cloud-aiplatform>=1.38`, which is not
+included in any extra or Docker image — see
+[Google Vertex AI](/docs/proxy#google-vertex-ai) for setup details.
 
 ### Proxy configuration
 
