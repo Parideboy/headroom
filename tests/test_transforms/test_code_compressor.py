@@ -2099,6 +2099,7 @@ class TestCSharpSupport:
         assert confidence > 0.0
 
 
+@pytest.mark.skipif(not TREE_SITTER_INSTALLED, reason="tree-sitter grammar pack not installed")
 class TestPhpSupport:
     """PHP (``php`` grammar) parity with C#: signatures preserved verbatim,
     function/method bodies compressed, ``<?php`` tag and ``namespace``/``use``
