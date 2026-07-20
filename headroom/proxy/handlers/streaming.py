@@ -494,13 +494,20 @@ class StreamingMixin:
                 idx = data.get("index")
                 target = (blocks_by_index.get(idx) if idx is not None else None) or current_block
                 if target is not None:
-                    # Parse accumulated JSON for tool_use blocks.
-                    if target.get("type") == "tool_use" and "_partial_json" in target:
+                    # Parse accumulated JSON into `input` for any block that
+                    # streamed `input_json_delta` — tool_use AND server_tool_use
+                    # (and future tool-ish blocks). Gating on the block type
+                    # missed server_tool_use, leaving its `input` at the empty
+                    # start-event value and leaking the `_partial_json` scratch
+                    # key into replayed assistant history, which Anthropic then
+                    # rejects with `server_tool_use.input: Input should be an
+                    # object` (#2438). Always strip the scratch key.
+                    if "_partial_json" in target:
+                        raw = target.pop("_partial_json")
                         try:
-                            target["input"] = json.loads(target["_partial_json"])
+                            target["input"] = json.loads(raw) if raw else {}
                         except json.JSONDecodeError:
                             target["input"] = {}
-                        del target["_partial_json"]
                     # Materialize the thinking buffer into the
                     # canonical `thinking` field expected by the
                     # Anthropic API.
