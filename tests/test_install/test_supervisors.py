@@ -524,13 +524,15 @@ def test_start_and_stop_supervisor_darwin_windows_and_none(monkeypatch) -> None:
     start_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
     stop_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
     # #1866: Windows service is task-backed. start re-enables the health
-    # watchdog then runs the startup task; stop ends the startup task then
-    # disables the watchdog so `ensure` cannot restart it minutes later.
+    # watchdog then runs the startup task. stop disables the watchdog, ends any
+    # in-flight health task, then ends the startup task last — so no running
+    # `ensure` can re-enable or restart the service after `stop` completes.
     assert calls == [
         ["schtasks", "/Change", "/TN", "headroom-default-health", "/ENABLE"],
         ["schtasks", "/Run", "/TN", "headroom-default-startup"],
-        ["schtasks", "/End", "/TN", "headroom-default-startup"],
         ["schtasks", "/Change", "/TN", "headroom-default-health", "/DISABLE"],
+        ["schtasks", "/End", "/TN", "headroom-default-health"],
+        ["schtasks", "/End", "/TN", "headroom-default-startup"],
     ]
 
 

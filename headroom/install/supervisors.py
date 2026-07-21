@@ -546,15 +546,19 @@ def stop_supervisor(manifest: DeploymentManifest) -> None:
             )
         return
     if _is_windows():
-        # Task-backed on Windows (#1866); ending the startup task stops the proxy.
-        # Also disable the 5-minute health watchdog — otherwise `ensure` would
-        # restart the deployment on the next interval, making `stop` non-durable.
-        # start/restart re-enable it (see start_supervisor).
+        # Task-backed on Windows (#1866). Order matters so `stop` is durable:
+        #   1. DISABLE the health watchdog — no future 5-minute triggers.
+        #   2. End any *already running* health task — /Change only blocks future
+        #      triggers, so an in-flight `ensure` could otherwise re-enable health
+        #      and restart the proxy after we stop it (best effort: usually not
+        #      running).
+        #   3. End the startup task LAST, so a proxy a racing `ensure` just
+        #      started is still torn down.
+        # start/restart re-enable health (see start_supervisor).
+        health = f"{manifest.service_name}-health"
+        subprocess.run(["schtasks", "/Change", "/TN", health, "/DISABLE"], check=True)
+        subprocess.run(["schtasks", "/End", "/TN", health], check=False)
         subprocess.run(["schtasks", "/End", "/TN", f"{manifest.service_name}-startup"], check=True)
-        subprocess.run(
-            ["schtasks", "/Change", "/TN", f"{manifest.service_name}-health", "/DISABLE"],
-            check=True,
-        )
 
 
 def remove_supervisor(manifest: DeploymentManifest) -> None:
