@@ -502,8 +502,13 @@ def start_supervisor(manifest: DeploymentManifest) -> None:
         _bootstrap_with_retry(domain, plist_path, action="start")
         return
     if _is_windows():
-        # Both SERVICE and TASK are task-backed on Windows (#1866); run the
-        # startup task to (re)launch the proxy now.
+        # Both SERVICE and TASK are task-backed on Windows (#1866). Re-enable the
+        # health watchdog (stop disables it, see stop_supervisor) before running
+        # the startup task to (re)launch the proxy now.
+        subprocess.run(
+            ["schtasks", "/Change", "/TN", f"{manifest.service_name}-health", "/ENABLE"],
+            check=True,
+        )
         subprocess.run(["schtasks", "/Run", "/TN", f"{manifest.service_name}-startup"], check=True)
 
 
@@ -542,7 +547,14 @@ def stop_supervisor(manifest: DeploymentManifest) -> None:
         return
     if _is_windows():
         # Task-backed on Windows (#1866); ending the startup task stops the proxy.
+        # Also disable the 5-minute health watchdog — otherwise `ensure` would
+        # restart the deployment on the next interval, making `stop` non-durable.
+        # start/restart re-enable it (see start_supervisor).
         subprocess.run(["schtasks", "/End", "/TN", f"{manifest.service_name}-startup"], check=True)
+        subprocess.run(
+            ["schtasks", "/Change", "/TN", f"{manifest.service_name}-health", "/DISABLE"],
+            check=True,
+        )
 
 
 def remove_supervisor(manifest: DeploymentManifest) -> None:
