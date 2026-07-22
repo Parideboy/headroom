@@ -3227,6 +3227,30 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         if not _request_can_view_dashboard_metadata(request, trusted_dashboard_client_cidrs):
             raise HTTPException(status_code=404)
 
+    def _require_same_origin_or_trusted_dashboard_client(request: Request) -> None:
+        """Same-origin CSRF guard for settings writes, trusted-dashboard aware.
+
+        ``require_same_origin`` only accepts an ``Origin`` that itself names a
+        loopback host, so a browser POST from a trusted-gateway dashboard
+        client was rejected even though the paired GET routes allow that same
+        caller (issue #2466). For non-loopback callers, accept an ``Origin``
+        that matches this request's own Host header, provided the caller is
+        already an IP-literal-Host, CIDR-trusted dashboard client. Loopback
+        callers keep the stricter loopback-only origin check unchanged.
+        """
+        if not _request_is_loopback(request):
+            origin = request.headers.get("origin")
+            host_header = request.headers.get("host")
+            if (
+                origin
+                and origin != "null"
+                and host_header
+                and _request_has_same_origin_or_no_provenance(request, host_header)
+                and _request_can_view_dashboard_metadata(request, trusted_dashboard_client_cidrs)
+            ):
+                return
+        _require_same_origin(request)
+
     @app.get("/admin/upstream", dependencies=[Depends(_require_loopback)])
     async def get_upstream():
         """Current Anthropic upstream + cc-switch reconciler state (loopback-only).
@@ -3354,7 +3378,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         "/settings",
         dependencies=[
             Depends(_require_loopback_or_trusted_dashboard_client),
-            Depends(_require_same_origin),
+            Depends(_require_same_origin_or_trusted_dashboard_client),
         ],
     )
     async def settings_post(request: Request):
@@ -3404,7 +3428,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         "/settings/apply",
         dependencies=[
             Depends(_require_loopback_or_trusted_dashboard_client),
-            Depends(_require_same_origin),
+            Depends(_require_same_origin_or_trusted_dashboard_client),
         ],
     )
     async def settings_apply(request: Request):

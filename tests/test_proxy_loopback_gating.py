@@ -203,6 +203,57 @@ def test_settings_trusted_gateway_cidr_mismatch_still_404s(
     assert client.get("/settings").status_code == 404
 
 
+@pytest.mark.parametrize(
+    "path,body",
+    [("/settings", {"values": {}}), ("/settings/apply", None)],
+)
+def test_settings_post_trusted_gateway_client_same_origin_allowed(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: dict | None
+) -> None:
+    """Regression for #2491 review: a trusted-gateway dashboard client's real
+    same-origin browser POST (Origin matching this Host) must not be rejected
+    by the loopback-only same-origin guard."""
+    monkeypatch.setenv("HEADROOM_PROXY_TRUSTED_DASHBOARD_CLIENT_CIDRS", "100.90.0.5/32")
+    client = TestClient(
+        _make_app(),
+        base_url="http://100.82.0.2:8787",
+        client=("100.90.0.5", 12345),
+    )
+    resp = client.post(path, json=body, headers={"origin": "http://100.82.0.2:8787"})
+    assert resp.status_code != 403, resp.text
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [("/settings", {"values": {}}), ("/settings/apply", None)],
+)
+def test_settings_post_trusted_gateway_client_mismatched_origin_rejected(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: dict | None
+) -> None:
+    """A trusted-gateway peer with a foreign Origin is still CSRF-rejected.
+
+    The mismatched Origin also fails the first (loopback-or-trusted-client)
+    gate's own same-origin check, so this surfaces as 404, not 403 -- either
+    way the write must not go through."""
+    monkeypatch.setenv("HEADROOM_PROXY_TRUSTED_DASHBOARD_CLIENT_CIDRS", "100.90.0.5/32")
+    client = TestClient(
+        _make_app(),
+        base_url="http://100.82.0.2:8787",
+        client=("100.90.0.5", 12345),
+    )
+    resp = client.post(path, json=body, headers={"origin": "http://attacker.example"})
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_settings_post_loopback_null_origin_still_rejected() -> None:
+    """Loopback callers keep the stricter loopback-only origin check: a
+    sandboxed-iframe/file:// "null" Origin must still 403, unaffected by the
+    trusted-dashboard-client carve-out."""
+    client = _loopback_client()
+    resp = client.post("/settings", json={"values": {}}, headers={"origin": "null"})
+    assert resp.status_code == 403, resp.text
+
+
 def test_dns_rebinding_host_header_rejected() -> None:
     # Loopback peer IP but an attacker-controlled Host header (the DNS-rebinding
     # shape) must still be rejected by the second gate.
