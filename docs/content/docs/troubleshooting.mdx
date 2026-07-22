@@ -396,6 +396,35 @@ Threat: Trojan:Win64/Lazy!MTB
 
 4. **Report the false positive to Microsoft** so a corrected signature ships for everyone: submit `sg.exe` at the [Microsoft Security Intelligence sample submission](https://www.microsoft.com/en-us/wdsi/filesubmission) page.
 
+### uv build errors: "src does not appear to be a Python project"
+
+**Symptom**: `uv tool install "headroom-ai[all]"` fails to build a dependency (commonly `litellm` or `cryptography`) with:
+
+```text
+error: Failed to build: <package>==<version>
+Caused by: `src does not appear to be a Python project, as neither `pyproject.toml`
+nor `setup.py` are present`
+```
+
+or a wheel install fails with `Unknown wheel data type: .DS_Store`.
+
+**Cause**: Corrupted or stale entries in uv's local build/wheel cache, not a Headroom dependency-pin problem. Headroom does not pin exact versions of `litellm` or `cryptography` that would trigger this.
+
+**Fix**: clear uv's cache and reinstall:
+
+```bash
+uv cache clean
+uv tool install "headroom-ai[all]"
+```
+
+To clear the cache for just one package instead:
+
+```bash
+uv cache clean litellm
+```
+
+If the failure is specifically for `ast-grep-cli==0.44.1`, that release is already excluded by Headroom's dependency pin (`ast-grep-cli>=0.30.0,!=0.44.1`) due to a compromised supply-chain build ([ast-grep/ast-grep#2799](https://github.com/ast-grep/ast-grep/issues/2799)) — `uv cache clean` and a plain reinstall should pick up a safe version automatically.
+
 ## Provider-Specific Issues
 
 ### OpenAI: Invalid API key
