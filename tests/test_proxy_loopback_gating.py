@@ -156,6 +156,53 @@ def test_ccr_retrieve_hash_route_blocks_valid_hash_for_non_loopback() -> None:
         reset_compression_store()
 
 
+SETTINGS_GATED = [
+    ("get", "/settings/schema"),
+    ("get", "/settings"),
+    ("get", "/dashboard/settings"),
+]
+
+
+@pytest.mark.parametrize("method,path", SETTINGS_GATED)
+def test_settings_non_loopback_gets_404_without_trusted_cidr(method: str, path: str) -> None:
+    resp = TestClient(_make_app()).request(method, path)
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.parametrize("method,path", SETTINGS_GATED)
+def test_settings_loopback_caller_allowed(method: str, path: str) -> None:
+    resp = _loopback_client().request(method, path)
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.parametrize("method,path", SETTINGS_GATED)
+def test_settings_trusted_gateway_dashboard_client_allowed(
+    monkeypatch: pytest.MonkeyPatch, method: str, path: str
+) -> None:
+    """Settings routes must follow the same trust chain as /stats so the
+    dashboard works behind a reverse-proxy/gateway (#2466)."""
+    monkeypatch.setenv("HEADROOM_PROXY_TRUSTED_DASHBOARD_CLIENT_CIDRS", "100.90.0.5/32")
+    client = TestClient(
+        _make_app(),
+        base_url="http://100.82.0.2:8787",
+        client=("100.90.0.5", 12345),
+    )
+    resp = client.request(method, path)
+    assert resp.status_code == 200, resp.text
+
+
+def test_settings_trusted_gateway_cidr_mismatch_still_404s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HEADROOM_PROXY_TRUSTED_DASHBOARD_CLIENT_CIDRS", "100.90.0.5/32")
+    client = TestClient(
+        _make_app(),
+        base_url="http://100.82.0.2:8787",
+        client=("100.90.0.9", 12345),
+    )
+    assert client.get("/settings").status_code == 404
+
+
 def test_dns_rebinding_host_header_rejected() -> None:
     # Loopback peer IP but an attacker-controlled Host header (the DNS-rebinding
     # shape) must still be rejected by the second gate.

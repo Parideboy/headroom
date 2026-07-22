@@ -3217,6 +3217,16 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     from headroom.proxy.loopback_guard import require_loopback as _require_loopback
     from headroom.proxy.loopback_guard import require_same_origin as _require_same_origin
 
+    def _require_loopback_or_trusted_dashboard_client(request: Request) -> None:
+        """Allow loopback callers, or gateway-forwarded dashboard clients.
+
+        Mirrors the trust chain already used by /stats and /stats-lifetime
+        (see _request_can_view_dashboard_metadata) so the settings UI works
+        the same way behind a reverse-proxy/gateway (issue #2466).
+        """
+        if not _request_can_view_dashboard_metadata(request, trusted_dashboard_client_cidrs):
+            raise HTTPException(status_code=404)
+
     @app.get("/admin/upstream", dependencies=[Depends(_require_loopback)])
     async def get_upstream():
         """Current Anthropic upstream + cc-switch reconciler state (loopback-only).
@@ -3316,7 +3326,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # (Phase 3's /settings/apply drives that).
     from headroom import settings_store
 
-    @app.get("/settings/schema", dependencies=[Depends(_require_loopback)])
+    @app.get(
+        "/settings/schema", dependencies=[Depends(_require_loopback_or_trusted_dashboard_client)]
+    )
     async def settings_schema(_request: Request):
         """Registry + grouped fields + effective values for the settings form."""
         schema = settings_store.to_schema()
@@ -3333,12 +3345,18 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             schema["supervised"] = False
         return JSONResponse(status_code=200, content=schema)
 
-    @app.get("/settings", dependencies=[Depends(_require_loopback)])
+    @app.get("/settings", dependencies=[Depends(_require_loopback_or_trusted_dashboard_client)])
     async def settings_get(_request: Request):
         """Return stored (file) values only; secret fields masked."""
         return JSONResponse(status_code=200, content=settings_store.stored_values())
 
-    @app.post("/settings", dependencies=[Depends(_require_loopback), Depends(_require_same_origin)])
+    @app.post(
+        "/settings",
+        dependencies=[
+            Depends(_require_loopback_or_trusted_dashboard_client),
+            Depends(_require_same_origin),
+        ],
+    )
     async def settings_post(request: Request):
         """Persist settings. Unknown key -> 400; bad type/enum/range -> 422.
 
@@ -3383,7 +3401,11 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         )
 
     @app.post(
-        "/settings/apply", dependencies=[Depends(_require_loopback), Depends(_require_same_origin)]
+        "/settings/apply",
+        dependencies=[
+            Depends(_require_loopback_or_trusted_dashboard_client),
+            Depends(_require_same_origin),
+        ],
     )
     async def settings_apply(request: Request):
         """Persist settings (optional body) then restart the proxy to apply them.
@@ -3446,7 +3468,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     @app.get(
         "/dashboard/settings",
         response_class=HTMLResponse,
-        dependencies=[Depends(_require_loopback)],
+        dependencies=[Depends(_require_loopback_or_trusted_dashboard_client)],
     )
     async def dashboard_settings():
         """Serve the Headroom settings GUI."""
