@@ -27,6 +27,23 @@ def _registrar(tmp_path: Path) -> OpencodeRegistrar:
     return OpencodeRegistrar(config_path=tmp_path / "opencode.json")
 
 
+def test_default_config_path_prefers_existing_jsonc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #1869: MCP registration must land in opencode.jsonc
+
+    when that's the file OpenCode actually reads, matching the provider-block
+    resolution in headroom.providers.opencode.config.
+    """
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.setenv("OPENCODE_HOME", str(tmp_path))
+    (tmp_path / "opencode.jsonc").write_text("{}", encoding="utf-8")
+
+    registrar = OpencodeRegistrar()
+
+    assert registrar._config_path == tmp_path / "opencode.jsonc"
+
+
 def test_detect_when_binary_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Detection succeeds when the opencode binary is in PATH."""
     monkeypatch.setenv("PATH", str(tmp_path))

@@ -1,37 +1,23 @@
 """OpenCode MCP registrar.
 
-OpenCode stores MCP server configuration in ``~/.config/opencode/opencode.json``
-under the top-level ``mcp`` key. This registrar edits that JSON file directly.
+OpenCode stores MCP server configuration under ``~/.config/opencode/opencode.json``
+(or ``opencode.jsonc``, if present) under the top-level ``mcp`` key. This registrar
+edits that JSON file directly.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Any
 
+from headroom.install.paths import opencode_config_path
+
 from .base import MCPRegistrar, RegisterResult, RegisterStatus, ServerSpec
 
 logger = logging.getLogger(__name__)
-
-
-def _opencode_home_dir() -> Path:
-    """Return the OpenCode home/config directory."""
-    env_path = os.environ.get("OPENCODE_HOME", "").strip()
-    if env_path:
-        return Path(env_path).expanduser()
-    return Path.home() / ".config" / "opencode"
-
-
-def _opencode_config_path() -> Path:
-    """Return the active OpenCode config path."""
-    env_path = os.environ.get("OPENCODE_CONFIG", "").strip()
-    if env_path:
-        return Path(env_path).expanduser()
-    return _opencode_home_dir() / "opencode.json"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -68,7 +54,7 @@ def _read_json_for_write(path: Path) -> dict[str, Any]:
     Returns ``{}`` only when the file is absent or empty (safe to start fresh).
     If the file exists with content but does not parse as a JSON object, raise
     :class:`_MalformedConfigError` so the caller aborts instead of overwriting
-    unrelated user config — ``opencode.json`` holds ``theme``/``model``/
+    unrelated user config — the OpenCode config file holds ``theme``/``model``/
     ``provider``/other MCP servers alongside the ``mcp`` block.
     """
     if not path.exists():
@@ -147,7 +133,7 @@ class OpencodeRegistrar(MCPRegistrar):
     display_name = "OpenCode"
 
     def __init__(self, *, config_path: Path | None = None) -> None:
-        self._config_path = config_path or _opencode_config_path()
+        self._config_path = config_path or opencode_config_path()
 
     def detect(self) -> bool:
         if shutil.which("opencode"):
@@ -209,8 +195,8 @@ class OpencodeRegistrar(MCPRegistrar):
             mcp[spec.name] = _spec_to_entry(spec)
             _write_json(self._config_path, data)
         except _MalformedConfigError as exc:
-            # Refuse to overwrite: opencode.json holds theme/model/provider and
-            # other MCP servers that a blind rewrite would wipe.
+            # Refuse to overwrite: the config file holds theme/model/provider
+            # and other MCP servers that a blind rewrite would wipe.
             return RegisterResult(
                 RegisterStatus.FAILED,
                 f"{self._config_path} exists but is not valid JSON ({exc}); "
