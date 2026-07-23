@@ -44,6 +44,10 @@ def _get_litellm_module() -> Any | None:
 
 logger = logging.getLogger("headroom.proxy")
 
+# Models we've already warned about missing pricing data, to avoid log spam
+# from repeated warnings for the same unresolvable model.
+_pricing_warned_models: set[str] = set()
+
 # Provider-specific cache discount multipliers (what fraction of input price)
 # Used to calculate dollar savings from prefix caching
 _CACHE_ECONOMICS = {
@@ -728,7 +732,9 @@ class CostTracker:
             return float(total_cost) if total_cost > 0 else None
 
         except Exception as e:
-            logger.warning(f"Failed to get pricing for model {model}: {e}")
+            if model not in _pricing_warned_models:
+                _pricing_warned_models.add(model)
+                logger.warning(f"Failed to get pricing for model {model}: {e}")
             return None
 
     def _prune_old_costs(self):
