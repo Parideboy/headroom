@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,32 @@ from .base import MCPRegistrar, RegisterResult, RegisterStatus, ServerSpec
 logger = logging.getLogger(__name__)
 
 
+def _strip_json_line_comments(text: str) -> str:
+    """Strip ``//`` line comments from JSONC text.
+
+    Tries standard JSON first (via the caller) so URLs containing ``//`` are
+    never mangled; this is only invoked as a fallback once plain
+    ``json.loads`` has already failed. Two-pass: (1) remove comment-only
+    lines, (2) strip inline trailing comments that follow a comma.
+    """
+    cleaned = re.sub(r"^\s*//[^\n]*\n", "", text, flags=re.MULTILINE)
+    return re.sub(r",\s*//[^\n]*", ",", cleaned)
+
+
+def _parse_json_loose(raw: str) -> dict[str, Any] | None:
+    """Parse JSON or JSONC text, returning ``None`` if it can't be parsed as an object."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            data = json.loads(_strip_json_line_comments(raw))
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
 def _read_json(path: Path) -> dict[str, Any]:
-    """Read a JSON file, returning empty dict if absent or unparseable.
+    """Read a JSON/JSONC file, returning empty dict if absent or unparseable.
 
     Safe for READ-ONLY callers only. Do NOT use before a full-file rewrite:
     an unparseable existing file returns ``{}`` here, and writing that back
@@ -31,13 +56,10 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
         return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
+    return _parse_json_loose(raw) or {}
 
 
 class _MalformedConfigError(Exception):
@@ -49,25 +71,25 @@ class _MalformedConfigError(Exception):
 
 
 def _read_json_for_write(path: Path) -> dict[str, Any]:
-    """Read a JSON object for a subsequent full-file rewrite.
+    """Read a JSON/JSONC object for a subsequent full-file rewrite.
 
     Returns ``{}`` only when the file is absent or empty (safe to start fresh).
-    If the file exists with content but does not parse as a JSON object, raise
-    :class:`_MalformedConfigError` so the caller aborts instead of overwriting
-    unrelated user config — the OpenCode config file holds ``theme``/``model``/
-    ``provider``/other MCP servers alongside the ``mcp`` block.
+    ``//`` line comments are stripped before parsing, matching the loose JSONC
+    handling used by the OpenCode provider-block writer — note the rewritten
+    file loses any comments it had. If the file exists with content but still
+    does not parse as a JSON object, raise :class:`_MalformedConfigError` so
+    the caller aborts instead of overwriting unrelated user config — the
+    OpenCode config file holds ``theme``/``model``/``provider``/other MCP
+    servers alongside the ``mcp`` block.
     """
     if not path.exists():
         return {}
     raw = path.read_text(encoding="utf-8")  # OSError propagates to the caller
     if not raw.strip():
         return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise _MalformedConfigError(str(exc)) from exc
-    if not isinstance(data, dict):
-        raise _MalformedConfigError("top-level JSON is not an object")
+    data = _parse_json_loose(raw)
+    if data is None:
+        raise _MalformedConfigError("not valid JSON/JSONC")
     return data
 
 
