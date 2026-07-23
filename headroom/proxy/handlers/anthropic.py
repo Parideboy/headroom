@@ -3216,6 +3216,13 @@ class AnthropicHandlerMixin:
                                     api_call_fn,
                                 )
                                 resp_json = final_resp_json
+                                if self.config.ccr_resolve_markers_inline:
+                                    from headroom.ccr.marker_resolution import (
+                                        resolve_markers_in_response,
+                                    )
+
+                                    final_resp_json = resolve_markers_in_response(final_resp_json)
+                                    resp_json = final_resp_json
                                 # Remove encoding headers since content is now uncompressed JSON
                                 ccr_response_headers = {
                                     k: v
