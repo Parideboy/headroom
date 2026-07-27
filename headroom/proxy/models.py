@@ -190,7 +190,8 @@ class ProxyConfig:
     # the headroom_retrieve tool (e.g. a LiteLLM guardrail/proxy hop with no
     # tool-call turn — issue #2509). Off by default: guessing "this caller
     # can't use tools" is fragile, so operators must opt in with
-    # --ccr-inline-resolve / HEADROOM_CCR_INLINE_RESOLVE.
+    # --ccr-inline-resolve / HEADROOM_CCR_INLINE_RESOLVE. Applies to
+    # non-streaming responses only; buffered-CCR streaming is untouched.
     ccr_resolve_markers_inline: bool = False
 
     # CCR Response Handling

@@ -321,7 +321,8 @@ def dashboard(port: int, no_open: bool) -> None:
         "Resolve <<ccr:...>> markers inline on the response path instead of "
         "relying on the model to call headroom_retrieve. For callers with no "
         "tool-call round-trip to redeem a marker (e.g. Headroom running as a "
-        "LiteLLM guardrail/proxy hop, see issue #2509). Off by default. "
+        "LiteLLM guardrail/proxy hop, see issue #2509). Applies to non-streaming "
+        "responses only. Off by default. "
         "Env: HEADROOM_CCR_INLINE_RESOLVE."
     ),
 )

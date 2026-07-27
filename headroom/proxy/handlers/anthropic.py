@@ -25,6 +25,7 @@ import httpx
 
 from headroom.agent_savings import proxy_pipeline_kwargs
 from headroom.ccr.context_tracker import looks_like_claude_code_compact_summary
+from headroom.ccr.marker_resolution import resolve_markers_in_response
 from headroom.copilot_auth import build_copilot_upstream_url
 from headroom.pipeline import PipelineStage, summarize_routing_markers
 from headroom.proxy.auth_mode import classify_auth_mode, classify_client
@@ -3216,13 +3217,6 @@ class AnthropicHandlerMixin:
                                     api_call_fn,
                                 )
                                 resp_json = final_resp_json
-                                if self.config.ccr_resolve_markers_inline:
-                                    from headroom.ccr.marker_resolution import (
-                                        resolve_markers_in_response,
-                                    )
-
-                                    final_resp_json = resolve_markers_in_response(final_resp_json)
-                                    resp_json = final_resp_json
                                 # Remove encoding headers since content is now uncompressed JSON
                                 ccr_response_headers = {
                                     k: v
@@ -3533,6 +3527,26 @@ class AnthropicHandlerMixin:
                             response_headers["x-headroom-cached"] = "true"
                         if _compression_failed:
                             response_headers["x-headroom-compression-failed"] = "true"
+
+                        # Inline CCR marker resolution, non-streaming only.
+                        # Deliberately OUTSIDE the has_ccr_tool_calls gate
+                        # above: the callers this flag exists for (#2509,
+                        # Headroom behind a LiteLLM guardrail hop) never get
+                        # a headroom_retrieve tool-call turn, so gating on
+                        # one makes the flag a no-op for its own use case.
+                        # Runs before the security scan so the scanner sees
+                        # the resolved text, not the marker.
+                        if (
+                            getattr(self.config, "ccr_resolve_markers_inline", False)
+                            and resp_json
+                            and response.status_code == 200
+                        ):
+                            resp_json = resolve_markers_in_response(resp_json)
+                            response = httpx.Response(
+                                status_code=200,
+                                content=json.dumps(resp_json).encode(),
+                                headers=response_headers,
+                            )
 
                         # Enterprise Security: scan response + de-anonymize.
                         # Gate on a 200 upstream like the sibling CCR/cache/buffered

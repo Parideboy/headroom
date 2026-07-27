@@ -146,7 +146,8 @@ SETTINGS: tuple[SettingField, ...] = (
         help=(
             "Resolve <<ccr:...>> markers on the response path instead of "
             "relying on headroom_retrieve tool calls. For callers with no "
-            "tool-call round-trip (e.g. a LiteLLM guardrail/proxy hop)."
+            "tool-call round-trip (e.g. a LiteLLM guardrail/proxy hop). "
+            "Non-streaming responses only."
         ),
         tier="advanced",
     ),

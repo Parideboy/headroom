@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 import httpx
 
 from headroom.agent_savings import proxy_pipeline_kwargs
+from headroom.ccr.marker_resolution import resolve_markers_in_response
 from headroom.config import unwrap_tool_call_name
 from headroom.copilot_auth import (
     apply_copilot_api_auth,
@@ -3923,12 +3924,6 @@ class OpenAIHandlerMixin:
                                 final_resp_json,
                                 api_call_fn,
                             )
-                            if self.config.ccr_resolve_markers_inline:
-                                from headroom.ccr.marker_resolution import (
-                                    resolve_markers_in_response,
-                                )
-
-                                final_resp_json = resolve_markers_in_response(final_resp_json)
                             backend_response.body = final_resp_json
                             logger.info(
                                 f"[{request_id}] CCR: Retrieval handled "
@@ -3945,6 +3940,19 @@ class OpenAIHandlerMixin:
                             # No silent fallback — fail loud per
                             # feedback_no_silent_fallbacks.md.
                             raise
+
+                    # Inline marker resolution runs OUTSIDE the tool-call
+                    # gate above: the callers this flag exists for (#2509,
+                    # Headroom as a LiteLLM guardrail hop) never emit a
+                    # headroom_retrieve tool call, so gating on one would
+                    # make the flag a no-op for exactly its use case.
+                    # Non-streaming responses only.
+                    if (
+                        getattr(self.config, "ccr_resolve_markers_inline", False)
+                        and backend_response.body
+                        and backend_response.status_code == 200
+                    ):
+                        backend_response.body = resolve_markers_in_response(backend_response.body)
 
                     # Extract usage from the FINAL backend body (after
                     # any CCR resolution) so the prefix tracker counts
@@ -4488,6 +4496,22 @@ class OpenAIHandlerMixin:
                     response_headers["x-headroom-cached"] = "true"
                 if _compression_failed:
                     response_headers["x-headroom-compression-failed"] = "true"
+
+                # Inline marker resolution, non-streaming only. The direct
+                # path has no CCR tool-call handling at all, which is
+                # exactly the #2509 shape: markers would otherwise reach
+                # the client as raw text.
+                if (
+                    getattr(self.config, "ccr_resolve_markers_inline", False)
+                    and resp_json
+                    and response.status_code == 200
+                ):
+                    resolved_json = resolve_markers_in_response(resp_json)
+                    return Response(
+                        content=json.dumps(resolved_json).encode(),
+                        status_code=response.status_code,
+                        headers=response_headers,
+                    )
 
                 return Response(
                     content=response.content,
@@ -5323,12 +5347,6 @@ class OpenAIHandlerMixin:
                                 api_call_fn,
                                 provider="openai_responses",
                             )
-                            if self.config.ccr_resolve_markers_inline:
-                                from headroom.ccr.marker_resolution import (
-                                    resolve_markers_in_response,
-                                )
-
-                                final_resp_json = resolve_markers_in_response(final_resp_json)
                             resp_json = final_resp_json
                             # Remove encoding headers since content is now
                             # uncompressed JSON we synthesized.
@@ -5552,6 +5570,21 @@ class OpenAIHandlerMixin:
                             _buffered_ccr_sse(),
                             media_type="text/event-stream",
                             headers=sse_headers,
+                        )
+
+                    # Inline marker resolution, non-streaming only. Runs
+                    # outside the has_ccr_tool_calls gate above on purpose:
+                    # the #2509 case has no retrieve tool call at all.
+                    if (
+                        getattr(self.config, "ccr_resolve_markers_inline", False)
+                        and resp_json
+                        and response.status_code == 200
+                    ):
+                        resolved_json = resolve_markers_in_response(resp_json)
+                        return Response(
+                            content=json.dumps(resolved_json).encode(),
+                            status_code=response.status_code,
+                            headers=response_headers,
                         )
 
                     return Response(
