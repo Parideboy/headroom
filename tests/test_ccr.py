@@ -148,6 +148,40 @@ class TestCompressionStore:
         assert never_stored["status"] == "missing"
         assert "Entry not found" in format_retrieval_miss_detail(never_stored)
 
+    def test_get_metadata_purge_still_reports_expiry(self):
+        """The proxy metadata path must not erase the miss reason (#2604).
+
+        `get_metadata()` runs on the marker-refresh path before any retrieve,
+        so if it purged silently the user got "Entry not found" for an entry
+        that had simply expired.
+        """
+        store = CompressionStore(default_ttl=1)
+
+        hash_key = store.store(original="[1,2,3]", compressed="[1]", ttl=1)
+        time.sleep(1.1)
+
+        assert store.get_metadata(hash_key) is None
+
+        status = store.get_entry_status(hash_key)
+        assert status["status"] == "expired_and_purged"
+        assert status["expiry_reason"] == "idle"
+        assert "Entry expired and was purged" in format_retrieval_miss_detail(status)
+        assert "idle TTL" in format_retrieval_miss_detail(status)
+
+    def test_get_metadata_purge_reports_max_lifetime(self):
+        """Metadata purge keeps the max-lifetime reason distinct from idle TTL."""
+        store = CompressionStore(default_ttl=100, default_max_lifetime=1)
+
+        hash_key = store.store(original="[1,2,3]", compressed="[1]")
+        time.sleep(1.1)
+
+        assert store.get_metadata(hash_key) is None
+
+        status = store.get_entry_status(hash_key)
+        assert status["status"] == "expired_and_purged"
+        assert status["expiry_reason"] == "max_lifetime"
+        assert "max lifetime" in format_retrieval_miss_detail(status)
+
     def test_eviction_at_capacity(self):
         """Oldest entries evicted when at capacity."""
         store = CompressionStore(max_entries=3)

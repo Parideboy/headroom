@@ -134,6 +134,11 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
     if entry_status == "evicted":
         return f"Entry evicted for capacity (CCR store limit: {status.get('max_entries')} entries)"
     if entry_status == "expired_and_purged":
+        if status.get("expiry_reason") == "max_lifetime":
+            return (
+                "Entry expired and was purged (CCR max lifetime: "
+                f"{status.get('max_lifetime_seconds')} seconds)"
+            )
         return f"Entry expired and was purged (CCR idle TTL: {ttl_seconds} seconds)"
 
     return f"Entry not found (CCR idle TTL: {default_ttl} seconds)"
@@ -644,8 +649,12 @@ class CompressionStore:
             if entry is None:
                 return None
 
-            if entry.is_expired():
+            reason = entry.expiry_reason()
+            if reason is not None:
                 self._backend.delete(hash_key)
+                # Record why, so a later get_entry_status() on this hash still
+                # reports the expiry instead of a generic "not found".
+                self._record_tombstone(hash_key, f"expired:{reason}", entry)
                 self._stale_heap_entries += 1
                 return None
 
