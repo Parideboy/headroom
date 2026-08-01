@@ -2646,7 +2646,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 continue
             if proxy.warmup.kompress.status == "loaded":
                 return True
-            proxy.warmup.kompress.mark_loaded(handle=compressor, backend=backend)
+            proxy.warmup.kompress.mark_loaded(
+                handle=compressor, backend=backend, source_status="runtime"
+            )
             return True
 
         try:
@@ -2662,7 +2664,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 pass
             else:
                 if backend and proxy.warmup.kompress.status != "loaded":
-                    proxy.warmup.kompress.mark_loaded(handle=model, backend=backend)
+                    proxy.warmup.kompress.mark_loaded(
+                        handle=model, backend=backend, source_status="runtime"
+                    )
         return True
 
     def _health_checks() -> dict[str, dict[str, Any]]:
@@ -3292,6 +3296,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
     @app.get("/debug/warmup", dependencies=[Depends(_require_loopback)])
     async def debug_warmup():
+        # Promote a deferred Kompress slot from live runtime state before we
+        # serialize. Without this the registry keeps reporting the startup
+        # snapshot (``status: null`` / ``source_status: deferred``) forever,
+        # even while the model is loaded and compressing, unless somebody
+        # happens to hit /health or /readyz first. Same read-only
+        # reconciliation those endpoints run (issue #2624).
+        _reconcile_kompress_health()
         warmup_registry = getattr(proxy, "warmup", None)
         payload = warmup_registry.to_dict() if warmup_registry is not None else {}
         payload["runtime"] = _runtime_payload()
