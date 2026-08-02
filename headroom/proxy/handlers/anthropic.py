@@ -868,7 +868,7 @@ class AnthropicHandlerMixin:
                     await _finalize_pre_upstream()
                     raise HTTPException(
                         status_code=429,
-                        detail=f"Budget exceeded for {self.config.budget_period} period",
+                        detail=self.cost_tracker.budget_denial_detail(),
                     )
 
             # Memory: Get user ID when memory is enabled (fallback to "default" for simple DevEx).

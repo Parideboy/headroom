@@ -113,6 +113,7 @@ from headroom.proxy import runtime_env
 from headroom.proxy.audit import is_auditable_path, record_admin_action
 from headroom.proxy.auth_mode import should_stamp_codex_client
 from headroom.proxy.background_compression import BackgroundCompressor
+from headroom.proxy.budget_basis_policy import resolve_estimated_basis_policy
 
 # =============================================================================
 # Extracted modules (re-exported for backward compatibility)
@@ -797,6 +798,7 @@ class HeadroomProxy(
             CostTracker(
                 budget_limit_usd=config.budget_limit_usd,
                 budget_period=config.budget_period,
+                estimated_basis_policy=config.budget_estimated_basis,
             )
             if config.cost_tracking_enabled
             else None
@@ -5472,6 +5474,17 @@ if __name__ == "__main__":
     # Cost
     parser.add_argument("--budget", type=float, help="Budget limit in USD")
     parser.add_argument("--budget-period", choices=["hourly", "daily", "monthly"], default="daily")
+    parser.add_argument(
+        "--budget-estimated-basis",
+        choices=["count", "ignore", "block"],
+        default=None,
+        help=(
+            "What spend booked from Headroom's own token estimate (provider returned no "
+            "usage breakdown) does to the budget: count it (default), ignore it, or block "
+            "requests rather than enforce the limit on an estimate. "
+            "Env: HEADROOM_BUDGET_ESTIMATED_BASIS."
+        ),
+    )
 
     # Logging
     parser.add_argument("--log-file", help="Log file path")
@@ -5574,6 +5587,10 @@ if __name__ == "__main__":
         rate_limit_tokens_per_minute=_get_env_int("HEADROOM_TPM", args.tpm),
         budget_limit_usd=args.budget,
         budget_period=args.budget_period,
+        budget_estimated_basis=cast(
+            Literal["count", "ignore", "block"],
+            resolve_estimated_basis_policy(args.budget_estimated_basis, os.environ),
+        ),
         log_file=_get_env_str("HEADROOM_LOG_FILE", args.log_file)
         if args.log_file
         else os.environ.get("HEADROOM_LOG_FILE"),
