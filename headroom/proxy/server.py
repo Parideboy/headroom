@@ -1299,6 +1299,9 @@ class HeadroomProxy(
         )
         self._compression_quarantine_releases: int = 0
         self._compression_metrics_lock = threading.Lock()
+        # Daemon thread that warms the Kompress model after startup when the
+        # eager preload deferred the native load (GH #2730). None until started.
+        self._kompress_warm_thread: threading.Thread | None = None
 
         # Backend for Anthropic API (direct, LiteLLM, or any-llm)
         # Supports: "anthropic" (direct), "bedrock", "vertex", "litellm-<provider>", or "anyllm"
@@ -1935,10 +1938,20 @@ class HeadroomProxy(
         gateway stalled 21 s while transformers, torch and the ONNX session
         came up. Loading on a background thread after a short delay moves that
         cost off the request path. Skipped on glibc older than 2.28 (the
-        affected host family) and when ``HEADROOM_KOMPRESS_WARMUP`` is ``0``;
-        ``1`` forces it. Returns ``True`` when a warm-up thread was started.
+        affected host family) and when ``HEADROOM_KOMPRESS_WARMUP`` is ``0``
+        (or ``HEADROOM_KOMPRESS_BACKGROUND_WARM=0``); ``1`` forces it.
+        Returns ``True`` when a warm-up thread was started.
+
+        The thread also promotes ``warmup.kompress``. The eager preload
+        deliberately skips ``preload()`` so a native load can never block the
+        port bind (GH #790), which left the slot at ``status="null"``, and
+        ``_reconcile_kompress_health`` only promotes it once a compressor
+        reports ``is_ready()`` — so an idle proxy reported
+        ``kompress: unhealthy, backend: null`` forever (GH #2730).
         """
         raw = os.environ.get("HEADROOM_KOMPRESS_WARMUP", "").strip().lower()
+        if os.environ.get("HEADROOM_KOMPRESS_BACKGROUND_WARM", "1").strip() == "0":
+            raw = "0"
         if raw in ("0", "false", "no", "off"):
             return False
         if not raw and os.environ.get("PYTEST_CURRENT_TEST"):
@@ -1978,21 +1991,42 @@ class HeadroomProxy(
         except ValueError:
             delay = 2.0
 
+        slot = self.warmup.kompress
+
         def _warm() -> None:
             time.sleep(max(0.0, delay))
             started = time.monotonic()
             try:
+                from headroom.transforms.kompress_compressor import KompressModelNotCached
+
+                not_cached: tuple[type[BaseException], ...] = (KompressModelNotCached,)
+            except Exception:  # ML extras absent; every failure is just "failed"
+                not_cached = ()
+            try:
                 backend = compressor.preload(allow_download=True)
+            except not_cached:
+                # A cold cache with downloads unavailable leaves the component
+                # deferred, exactly as it behaved before this thread existed.
+                slot.info["detail"] = "model not cached"
+                logger.debug("Kompress background warm-up: model not cached")
+                return
             except Exception as exc:  # the lazy request path still loads on first use
+                slot.info["detail"] = f"warm failed: {exc}"
                 logger.warning("Kompress background warm-up failed: %s", exc)
                 return
+            if not backend:
+                return
+            slot.info.pop("detail", None)
+            slot.mark_loaded(handle=compressor, backend=backend)
             logger.info(
                 "Kompress: warmed in the background in %.0f ms (backend %s)",
                 (time.monotonic() - started) * 1000,
                 backend,
             )
 
-        threading.Thread(target=_warm, name="kompress-warmup", daemon=True).start()
+        thread = threading.Thread(target=_warm, name="kompress-warmup", daemon=True)
+        self._kompress_warm_thread = thread
+        thread.start()
         return True
 
     async def startup(self):
@@ -3036,6 +3070,31 @@ class ActivityMiddleware:
             self.proxy._activity_generation += 1
 
 
+def _kompress_routers(proxy: HeadroomProxy) -> list[ContentRouter]:
+    """Kompress-enabled ContentRouters across both pipelines, deduped by identity."""
+    routers: list[ContentRouter] = []
+    for pipeline in (proxy.anthropic_pipeline, proxy.openai_pipeline):
+        for transform in getattr(pipeline, "transforms", ()):
+            if (
+                isinstance(transform, ContentRouter)
+                and transform.config.enable_kompress
+                and all(transform is not item for item in routers)
+            ):
+                routers.append(transform)
+    return routers
+
+
+def _kompress_compressors(proxy: HeadroomProxy) -> list[Any]:
+    """Compressor instances held by the kompress-enabled routers, deduped."""
+    compressors: list[Any] = []
+    for router in _kompress_routers(proxy):
+        for name in ("_kompress", "_kompress_remote"):
+            compressor = getattr(router, name, None)
+            if compressor is not None and all(compressor is not item for item in compressors):
+                compressors.append(compressor)
+    return compressors
+
+
 def create_app(config: ProxyConfig | None = None) -> FastAPI:
     """Create FastAPI application."""
     if not FASTAPI_AVAILABLE:
@@ -3410,30 +3469,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         return result
 
     def _kompress_health_routers() -> list[ContentRouter]:
-        routers: list[ContentRouter] = []
-        for pipeline in (proxy.anthropic_pipeline, proxy.openai_pipeline):
-            for transform in getattr(pipeline, "transforms", ()):
-                if (
-                    isinstance(transform, ContentRouter)
-                    and transform.config.enable_kompress
-                    and all(transform is not item for item in routers)
-                ):
-                    routers.append(transform)
-        return routers
+        return _kompress_routers(proxy)
 
     def _reconcile_kompress_health() -> bool:
-        routers = _kompress_health_routers()
-        if not routers:
+        if not _kompress_health_routers():
             return False
 
-        compressors: list[Any] = []
-        for router in routers:
-            for name in ("_kompress", "_kompress_remote"):
-                compressor = getattr(router, name, None)
-                if compressor is not None and all(compressor is not item for item in compressors):
-                    compressors.append(compressor)
-
-        for compressor in compressors:
+        for compressor in _kompress_compressors(proxy):
             try:
                 if not compressor.is_ready():
                     continue
@@ -3466,6 +3508,29 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                         handle=model, backend=backend, source_status="runtime"
                     )
         return True
+
+    def _kompress_detail() -> str:
+        """Human-readable reason behind the kompress readiness bit.
+
+        ``ready=false`` on its own is ambiguous — the model may be warming in
+        the background, missing from the local cache, or the extras may not be
+        installed at all (GH #2730).
+        """
+        slot = proxy.warmup.kompress
+        if slot.status == "loaded":
+            return "loaded"
+        detail = slot.info.get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+        if slot.error:
+            return slot.error
+        warm_thread = getattr(proxy, "_kompress_warm_thread", None)
+        if warm_thread is not None and warm_thread.is_alive():
+            return "warming"
+        source_status = slot.info.get("source_status")
+        if isinstance(source_status, str) and source_status:
+            return source_status
+        return "not installed"
 
     def _health_checks() -> dict[str, dict[str, Any]]:
         kompress_enabled = _reconcile_kompress_health()
@@ -3519,6 +3584,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 ready=proxy.warmup.kompress.status == "loaded",
                 optional=True,
                 backend=proxy.warmup.kompress.info.get("backend", None),
+                detail=_kompress_detail(),
             ),
         }
 
