@@ -72,6 +72,7 @@ def test_readyz_excludes_kompress_from_aggregate_readiness(monkeypatch):
         "status": "degraded",
         "optional": True,
         "backend": None,
+        "detail": "model not cached",
     }
 
 
@@ -88,6 +89,7 @@ def test_readyz_promotes_deferred_kompress_after_runtime_load(monkeypatch):
         "status": "healthy",
         "optional": True,
         "backend": "onnx",
+        "detail": "loaded",
     }
     # The promotion must also clear the startup marker, otherwise the slot
     # serializes as loaded-but-deferred in /debug/warmup.
@@ -114,6 +116,7 @@ def test_readyz_promotes_kompress_from_module_cache(monkeypatch, attached):
         "status": "healthy",
         "optional": True,
         "backend": "onnx",
+        "detail": "loaded",
     }
     assert proxy.warmup.kompress.handle is model
     if compressor is not None:
@@ -147,6 +150,7 @@ def test_readyz_keeps_pending_kompress_unloaded(monkeypatch):
         "status": "degraded",
         "optional": True,
         "backend": None,
+        "detail": "not installed",
     }
     assert compressor.calls == ["is_ready"]
 
@@ -187,6 +191,7 @@ def test_readyz_disabled_kompress_skips_inspection(monkeypatch):
         "status": "disabled",
         "optional": True,
         "backend": None,
+        "detail": "not installed",
     }
     assert compressor.calls == []
 
@@ -209,6 +214,7 @@ def test_readyz_per_provider_kompress_override_reenables_health(monkeypatch):
         "status": "healthy",
         "optional": True,
         "backend": "onnx",
+        "detail": "loaded",
     }
     assert compressor.calls == ["is_ready", "ready_backend"]
 
@@ -231,6 +237,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
         "status": "degraded",
         "optional": True,
         "backend": None,
+        "detail": "not installed",
     }
 
 
@@ -247,6 +254,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "degraded",
                 "optional": True,
                 "backend": None,
+                "detail": "not installed",
             },
         ),
         (
@@ -259,6 +267,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "healthy",
                 "optional": True,
                 "backend": "onnx",
+                "detail": "loaded",
             },
         ),
         (
@@ -271,6 +280,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "healthy",
                 "optional": True,
                 "backend": "remote",
+                "detail": "loaded",
             },
         ),
         (
@@ -283,6 +293,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "healthy",
                 "optional": True,
                 "backend": "onnx",
+                "detail": "loaded",
             },
         ),
         (
@@ -295,6 +306,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "healthy",
                 "optional": True,
                 "backend": "existing",
+                "detail": "loaded",
             },
         ),
         (
@@ -307,6 +319,7 @@ def test_readyz_never_calls_lazy_kompress_getters(monkeypatch):
                 "status": "disabled",
                 "optional": True,
                 "backend": None,
+                "detail": "not installed",
             },
         ),
     ],
