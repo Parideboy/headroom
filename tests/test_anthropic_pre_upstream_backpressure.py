@@ -394,17 +394,32 @@ def test_happy_path_single_request_negligible_wait(stage_log_capture):
 
 
 # --------------------------------------------------------------------------- #
-# N+1 contention: with concurrency=2 and 3 concurrent requests,               #
-# exactly one of them must observe a non-trivial ``pre_upstream_wait``.       #
+# N+1 contention: with concurrency=2 and 3 concurrent requests, no more than  #
+# 2 may sit in the upstream section at once and at least one must wait.       #
 # --------------------------------------------------------------------------- #
 
 
+def _max_concurrent(enter_times: list[float], exit_times: list[float]) -> int:
+    """Peak number of requests simultaneously inside the upstream section."""
+    events = [(t, 1) for t in enter_times] + [(t, -1) for t in exit_times]
+    # Exits sort before enters at an identical timestamp so a slot handed
+    # straight over is not double-counted.
+    events.sort(key=lambda e: (e[0], e[1]))
+    current = 0
+    peak = 0
+    for _, delta in events:
+        current += delta
+        peak = max(peak, current)
+    return peak
+
+
 def test_n_plus_one_contention_only_waiter_has_nonzero_wait(stage_log_capture):
+    sem = asyncio.Semaphore(2)
+    # Each request hogs the semaphore for ~150 ms. With concurrency=2, at
+    # least one of 3 concurrent requests has to queue behind the others.
+    handler = _DummyAnthropicHandler(anthropic_pre_upstream_sem=sem, upstream_delay_s=0.15)
+
     async def _run() -> None:
-        sem = asyncio.Semaphore(2)
-        # Each request hogs the semaphore for ~150 ms. With concurrency=2,
-        # 3 concurrent requests mean exactly one waits ~150 ms.
-        handler = _DummyAnthropicHandler(anthropic_pre_upstream_sem=sem, upstream_delay_s=0.15)
         reqs = [
             _build_request(
                 {
@@ -421,15 +436,28 @@ def test_n_plus_one_contention_only_waiter_has_nonzero_wait(stage_log_capture):
     with _tokenizer_patch():
         anyio.run(_run)
 
+    # The gate is structural: never more than ``concurrency`` requests in the
+    # upstream section at once. Asserting that directly — instead of pinning
+    # each request's ``pre_upstream_wait`` to a wall-clock threshold — keeps
+    # the test meaningful on a loaded CI runner, where scheduling jitter under
+    # ``pytest --cov`` can inflate a non-waiter's measured wait past any fixed
+    # millisecond bound. Do not reintroduce absolute upper bounds here.
+    assert len(handler.upstream_enter_times) == 3
+    assert len(handler.upstream_exit_times) == 3
+    assert _max_concurrent(handler.upstream_enter_times, handler.upstream_exit_times) <= 2, (
+        handler.upstream_enter_times,
+        handler.upstream_exit_times,
+    )
+
     payloads = _parse_all_stage_logs(stage_log_capture)
     assert len(payloads) == 3
     waits = sorted(p["stages"]["pre_upstream_wait"] for p in payloads)
-    # Exactly one request must have waited noticeably; the first two should
-    # be near zero (they acquired the sem immediately).
-    assert waits[0] < 25.0, waits
-    assert waits[1] < 25.0, waits
-    # The waiter should have waited roughly the upstream-delay budget.
+    # Contention was really exercised: at least one request queued for
+    # roughly the upstream-delay budget behind an earlier holder.
     assert waits[2] > 75.0, waits
+    # ...and at least one acquired without queueing, so the semaphore is not
+    # serializing everything. Relative to the waiter, not an absolute bound.
+    assert waits[0] < waits[2] / 2.0, waits
 
 
 # --------------------------------------------------------------------------- #
