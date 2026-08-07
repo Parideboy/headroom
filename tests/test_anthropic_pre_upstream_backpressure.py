@@ -119,6 +119,7 @@ class _DummyAnthropicHandler(AnthropicHandlerMixin):
         *,
         anthropic_pre_upstream_sem: asyncio.Semaphore | None = None,
         upstream_delay_s: float = 0.0,
+        upstream_release: asyncio.Semaphore | None = None,
         raise_during_critical: bool = False,
         security: Any = None,
         upstream_status: int = 200,
@@ -206,6 +207,13 @@ class _DummyAnthropicHandler(AnthropicHandlerMixin):
         self._raise_during_critical = raise_during_critical
         self.upstream_enter_times: list[float] = []
         self.upstream_exit_times: list[float] = []
+        # Deterministic hold: when set, a request inside the upstream section
+        # blocks until the test hands it a permit, instead of sleeping for
+        # ``upstream_delay_s``. One ``release()`` frees exactly one holder, so
+        # a test can prove that the (N+1)th request enters only once a slot is
+        # actually returned -- no wall-clock thresholds involved.
+        self._upstream_release = upstream_release
+        self.upstream_entered = asyncio.Condition()
 
     async def _run_compression_in_executor(self, fn, *, timeout):  # noqa: ANN001
         # Mirror of ``HeadroomProxy._run_compression_in_executor`` for the
@@ -271,7 +279,11 @@ class _DummyAnthropicHandler(AnthropicHandlerMixin):
             raise RuntimeError("synthetic pre-upstream failure")
         enter = time.perf_counter()
         self.upstream_enter_times.append(enter)
-        if self._upstream_delay_s > 0:
+        async with self.upstream_entered:
+            self.upstream_entered.notify_all()
+        if self._upstream_release is not None:
+            await self._upstream_release.acquire()
+        elif self._upstream_delay_s > 0:
             await asyncio.sleep(self._upstream_delay_s)
         self.upstream_exit_times.append(time.perf_counter())
         return _ResponseStub(status_code=self._upstream_status)
@@ -413,51 +425,99 @@ def _max_concurrent(enter_times: list[float], exit_times: list[float]) -> int:
     return peak
 
 
-def test_n_plus_one_contention_only_waiter_has_nonzero_wait(stage_log_capture):
+async def _await_entered(handler: _DummyAnthropicHandler, count: int) -> None:
+    """Block until ``count`` requests have entered the upstream section."""
+    async with handler.upstream_entered:
+        await handler.upstream_entered.wait_for(lambda: len(handler.upstream_enter_times) >= count)
+
+
+async def _drain_scheduler(iterations: int = 100) -> None:
+    """Give every runnable task ample opportunity to progress.
+
+    A bounded number of event-loop turns, not a duration: a request that is
+    *able* to enter the upstream section will have done so long before this
+    returns, no matter how slow or how loaded the machine is.
+    """
+    for _ in range(iterations):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize("_iteration", range(10))
+def test_n_plus_one_contention_blocks_until_slot_frees(_iteration, stage_log_capture):
+    """The (N+1)th request enters the upstream section only when a slot frees.
+
+    Contention is driven by coordination primitives, never by sleeps or
+    millisecond thresholds: the two admitted requests are pinned inside the
+    upstream section until the test hands out a permit. Every assertion is
+    therefore structural (occupancy, ordering, semaphore state) and stays
+    valid under arbitrary scheduling pauses on a loaded CI runner. Do not
+    reintroduce wall-clock bounds here, absolute *or* relative to another
+    request's measured wait -- both fail when the loop delays all three
+    coroutines around acquisition while the gate itself behaves correctly.
+    """
     sem = asyncio.Semaphore(2)
-    # Each request hogs the semaphore for ~150 ms. With concurrency=2, at
-    # least one of 3 concurrent requests has to queue behind the others.
-    handler = _DummyAnthropicHandler(anthropic_pre_upstream_sem=sem, upstream_delay_s=0.15)
+    release = asyncio.Semaphore(0)
+    handler = _DummyAnthropicHandler(anthropic_pre_upstream_sem=sem, upstream_release=release)
+    reqs = [
+        _build_request(
+            {
+                "model": "claude-3-5-sonnet-latest",
+                "messages": [{"role": "user", "content": f"hello {i}"}],
+            },
+            {"authorization": "Bearer sk-ant-api-test"},
+        )
+        for i in range(3)
+    ]
 
     async def _run() -> None:
-        reqs = [
-            _build_request(
-                {
-                    "model": "claude-3-5-sonnet-latest",
-                    "messages": [{"role": "user", "content": f"hello {i}"}],
-                },
-                {"authorization": "Bearer sk-ant-api-test"},
-            )
-            for i in range(3)
-        ]
-        await asyncio.gather(*(handler.handle_anthropic_messages(r) for r in reqs))
-        assert sem._value == 2  # semaphore fully released
+        # Below the 15 s pre-upstream acquire timeout, so a genuine deadlock
+        # surfaces as a test failure rather than as the fail-open path.
+        with anyio.fail_after(10):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(handler.handle_anthropic_messages, reqs[0])
+                tg.start_soon(handler.handle_anthropic_messages, reqs[1])
+
+                # Both slots provably occupied.
+                await _await_entered(handler, 2)
+                assert sem._value == 0
+
+                # The third request cannot enter while both slots are held.
+                tg.start_soon(handler.handle_anthropic_messages, reqs[2])
+                await _drain_scheduler()
+                assert len(handler.upstream_enter_times) == 2, handler.upstream_enter_times
+                assert len(handler.upstream_exit_times) == 0, handler.upstream_exit_times
+
+                # Free exactly one holder: now -- and only now -- it enters.
+                release.release()
+                await _await_entered(handler, 3)
+                assert len(handler.upstream_exit_times) == 1, handler.upstream_exit_times
+
+                release.release()
+                release.release()
 
     with _tokenizer_patch():
         anyio.run(_run)
 
-    # The gate is structural: never more than ``concurrency`` requests in the
-    # upstream section at once. Asserting that directly — instead of pinning
-    # each request's ``pre_upstream_wait`` to a wall-clock threshold — keeps
-    # the test meaningful on a loaded CI runner, where scheduling jitter under
-    # ``pytest --cov`` can inflate a non-waiter's measured wait past any fixed
-    # millisecond bound. Do not reintroduce absolute upper bounds here.
     assert len(handler.upstream_enter_times) == 3
     assert len(handler.upstream_exit_times) == 3
+    # Never more than ``concurrency`` requests inside the upstream section.
     assert _max_concurrent(handler.upstream_enter_times, handler.upstream_exit_times) <= 2, (
         handler.upstream_enter_times,
         handler.upstream_exit_times,
     )
+    # The waiter entered after a slot was handed back, not alongside the holders.
+    assert handler.upstream_enter_times[2] >= handler.upstream_exit_times[0], (
+        handler.upstream_enter_times,
+        handler.upstream_exit_times,
+    )
+    # Semaphore fully released.
+    assert sem._value == 2
 
     payloads = _parse_all_stage_logs(stage_log_capture)
     assert len(payloads) == 3
-    waits = sorted(p["stages"]["pre_upstream_wait"] for p in payloads)
-    # Contention was really exercised: at least one request queued for
-    # roughly the upstream-delay budget behind an earlier holder.
-    assert waits[2] > 75.0, waits
-    # ...and at least one acquired without queueing, so the semaphore is not
-    # serializing everything. Relative to the waiter, not an absolute bound.
-    assert waits[0] < waits[2] / 2.0, waits
+    waits = [p["stages"]["pre_upstream_wait"] for p in payloads]
+    # Contention was recorded at all -- no upper bound, no ratio.
+    assert max(waits) > 0.0, waits
 
 
 # --------------------------------------------------------------------------- #
