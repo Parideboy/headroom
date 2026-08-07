@@ -151,9 +151,10 @@ async def test_startup_reports_deferred_kompress(caplog):
             server_mod.logger.removeHandler(caplog.handler)
 
         assert proxy._kompress_status == "deferred"
-        assert (
-            "Kompress: DEFERRED (wired into pipeline; model loads in background)" in caplog.messages
-        )
+        # The wording after the prefix is conditional (a background warm-up
+        # thread started or not), so pin the prefix and the real invariant:
+        # deferred must never be reported as "not installed".
+        assert any(message.startswith("Kompress: DEFERRED") for message in caplog.messages)
         assert not any("Kompress: not installed" in message for message in caplog.messages)
     finally:
         await proxy.shutdown()

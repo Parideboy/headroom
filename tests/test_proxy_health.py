@@ -336,3 +336,33 @@ def test_readyz_kompress_state_matrix(monkeypatch, slot_status, compressor, disa
     payload = TestClient(app).get("/readyz").json()["checks"]["kompress"]
 
     assert payload == expected
+
+
+# /health and /readyz are auth-exempt, so nothing they serialize may carry raw
+# exception text: loader failures embed absolute paths, model ids and URLs.
+_SENTINEL_DETAIL = "/opt/secret-path/model.onnx token=SENTINEL-LEAK-9f3a"
+
+
+@pytest.mark.parametrize("endpoint", ["/health", "/readyz"])
+def test_public_health_does_not_leak_warm_failure_text(monkeypatch, endpoint):
+    app, proxy = _health_app(monkeypatch)
+    # What the background warm thread would have written pre-#2799 review.
+    proxy.warmup.kompress.info["detail"] = f"warm failed: {_SENTINEL_DETAIL}"
+
+    response = TestClient(app).get(endpoint)
+
+    assert response.json()["checks"]["kompress"]["detail"] == "unavailable"
+    assert "SENTINEL-LEAK-9f3a" not in response.text
+    assert "secret-path" not in response.text
+
+
+@pytest.mark.parametrize("endpoint", ["/health", "/readyz"])
+def test_public_health_does_not_leak_slot_error_text(monkeypatch, endpoint):
+    app, proxy = _health_app(monkeypatch)
+    proxy.warmup.kompress.mark_error(f"native load failed: {_SENTINEL_DETAIL}")
+
+    response = TestClient(app).get(endpoint)
+
+    assert response.json()["checks"]["kompress"]["detail"] == "unavailable"
+    assert "SENTINEL-LEAK-9f3a" not in response.text
+    assert "secret-path" not in response.text

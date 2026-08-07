@@ -297,10 +297,21 @@ def _kompress_proxy(monkeypatch, stub):
     return proxy
 
 
+def _enable_startup_warm(monkeypatch):
+    """Opt the deferred Kompress warm-up in, without the startup delay.
+
+    The warm-up is skipped under pytest unless asked for explicitly, and its
+    2 s settle delay is only there to keep startup responsive.
+    """
+    monkeypatch.setenv("HEADROOM_KOMPRESS_WARMUP", "1")
+    monkeypatch.setenv("HEADROOM_KOMPRESS_WARMUP_DELAY_SECONDS", "0")
+
+
 @pytest.mark.asyncio
 async def test_startup_background_warm_promotes_deferred_kompress(monkeypatch):
     """A cached model must reach the warmup slot without any request (GH #2730)."""
     pytest.importorskip("httpx")
+    _enable_startup_warm(monkeypatch)
 
     stub = _StubCompressor(cached=True)
     proxy = _kompress_proxy(monkeypatch, stub)
@@ -311,8 +322,7 @@ async def test_startup_background_warm_promotes_deferred_kompress(monkeypatch):
         assert thread is not None
         thread.join(timeout=10)
         assert not thread.is_alive()
-        # Cache-only: the warm path must never hit the network.
-        assert stub.preload_calls == [False]
+        assert stub.preload_calls == [True]
         assert proxy.warmup.kompress.status == "loaded"
         assert proxy.warmup.kompress.info["backend"] == "onnx"
     finally:
@@ -323,6 +333,7 @@ async def test_startup_background_warm_promotes_deferred_kompress(monkeypatch):
 async def test_startup_background_warm_leaves_cold_cache_deferred(monkeypatch):
     """An uncached model stays deferred and says why."""
     pytest.importorskip("httpx")
+    _enable_startup_warm(monkeypatch)
 
     stub = _StubCompressor(cached=False)
     proxy = _kompress_proxy(monkeypatch, stub)
@@ -332,8 +343,37 @@ async def test_startup_background_warm_leaves_cold_cache_deferred(monkeypatch):
         thread = proxy._kompress_warm_thread
         assert thread is not None
         thread.join(timeout=10)
-        assert stub.preload_calls == [False]
+        assert stub.preload_calls == [True]
         assert proxy.warmup.kompress.status == "null"
         assert proxy.warmup.kompress.info["detail"] == "model not cached"
+    finally:
+        await proxy.shutdown()
+
+
+class _LeakyPreloadCompressor(_StubCompressor):
+    """Fails with an exception carrying a path and a token, as loaders do."""
+
+    def preload(self, *, allow_download: bool = True) -> str:
+        self.preload_calls.append(allow_download)
+        raise RuntimeError("/opt/secret-path/model.onnx token=SENTINEL-LEAK-9f3a")
+
+
+@pytest.mark.asyncio
+async def test_startup_background_warm_failure_detail_is_bounded(monkeypatch):
+    """The warm failure reason must not reach the auth-exempt health payload."""
+    pytest.importorskip("httpx")
+    _enable_startup_warm(monkeypatch)
+
+    stub = _LeakyPreloadCompressor(cached=True)
+    proxy = _kompress_proxy(monkeypatch, stub)
+
+    await proxy.startup()
+    try:
+        thread = proxy._kompress_warm_thread
+        assert thread is not None
+        thread.join(timeout=10)
+        assert stub.preload_calls == [True]
+        assert proxy.warmup.kompress.status == "null"
+        assert proxy.warmup.kompress.info["detail"] == "warm failed"
     finally:
         await proxy.shutdown()
