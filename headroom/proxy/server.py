@@ -142,6 +142,14 @@ from headroom.proxy.helpers import (
     resolve_display_provider,
     retry_after_ms,
 )
+from headroom.proxy.kompress_health_detail_policy import (
+    KOMPRESS_DETAIL_LOADED,
+    KOMPRESS_DETAIL_NOT_CACHED,
+    KOMPRESS_DETAIL_NOT_INSTALLED,
+    KOMPRESS_DETAIL_WARM_FAILED,
+    KOMPRESS_DETAIL_WARMING,
+    public_detail,
+)
 from headroom.proxy.loop_callback_failure_policy import is_known_websocket_callback_failure
 from headroom.proxy.loopback_guard import is_loopback_host
 from headroom.proxy.memory_handler import MemoryConfig, MemoryHandler
@@ -1751,11 +1759,14 @@ class HeadroomProxy(
                 try:
                     backend = compressor.preload(allow_download=False)
                 except not_cached:
-                    slot.info["detail"] = "model not cached"
+                    slot.info["detail"] = KOMPRESS_DETAIL_NOT_CACHED
                     continue
-                except Exception as exc:
-                    slot.info["detail"] = f"warm failed: {exc}"
-                    logger.debug("Kompress background warm failed: %s", exc)
+                except Exception:
+                    # The detail lands on the auth-exempt /health payload, so it
+                    # stays a bounded token; loader failures embed paths, model
+                    # ids and URLs. The real cause goes to the log only.
+                    slot.info["detail"] = KOMPRESS_DETAIL_WARM_FAILED
+                    logger.warning("Kompress background warm failed", exc_info=True)
                     continue
                 if not backend:
                     continue
@@ -2895,22 +2906,28 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         ``ready=false`` on its own is ambiguous — the model may be warming in
         the background, missing from the local cache, or the extras may not be
         installed at all (GH #2730).
+
+        This value is served by the auth-exempt ``/health`` and ``/readyz``, so
+        every candidate goes through :func:`public_detail` and anything outside
+        ``KOMPRESS_HEALTH_DETAILS`` collapses to ``unavailable``. That matters
+        most for ``slot.error``, which carries raw loader exception text.
+        ``/debug/warmup`` and the proxy log still hold the precise cause.
         """
         slot = proxy.warmup.kompress
         if slot.status == "loaded":
-            return "loaded"
+            return KOMPRESS_DETAIL_LOADED
         detail = slot.info.get("detail")
         if isinstance(detail, str) and detail:
-            return detail
+            return public_detail(detail)
         if slot.error:
-            return slot.error
+            return public_detail(slot.error)
         warm_thread = getattr(proxy, "_kompress_warm_thread", None)
         if warm_thread is not None and warm_thread.is_alive():
-            return "warming"
+            return KOMPRESS_DETAIL_WARMING
         source_status = slot.info.get("source_status")
         if isinstance(source_status, str) and source_status:
-            return source_status
-        return "not installed"
+            return public_detail(source_status)
+        return KOMPRESS_DETAIL_NOT_INSTALLED
 
     def _health_checks() -> dict[str, dict[str, Any]]:
         kompress_enabled = _reconcile_kompress_health()

@@ -337,3 +337,31 @@ async def test_startup_background_warm_leaves_cold_cache_deferred(monkeypatch):
         assert proxy.warmup.kompress.info["detail"] == "model not cached"
     finally:
         await proxy.shutdown()
+
+
+class _LeakyPreloadCompressor(_StubCompressor):
+    """Fails with an exception carrying a path and a token, as loaders do."""
+
+    def preload(self, *, allow_download: bool = True) -> str:
+        self.preload_calls.append(allow_download)
+        raise RuntimeError("/opt/secret-path/model.onnx token=SENTINEL-LEAK-9f3a")
+
+
+@pytest.mark.asyncio
+async def test_startup_background_warm_failure_detail_is_bounded(monkeypatch):
+    """The warm failure reason must not reach the auth-exempt health payload."""
+    pytest.importorskip("httpx")
+
+    stub = _LeakyPreloadCompressor(cached=True)
+    proxy = _kompress_proxy(monkeypatch, stub)
+
+    await proxy.startup()
+    try:
+        thread = proxy._kompress_warm_thread
+        assert thread is not None
+        thread.join(timeout=10)
+        assert stub.preload_calls == [False]
+        assert proxy.warmup.kompress.status == "null"
+        assert proxy.warmup.kompress.info["detail"] == "warm failed"
+    finally:
+        await proxy.shutdown()
