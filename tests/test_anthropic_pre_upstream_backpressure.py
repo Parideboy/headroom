@@ -431,14 +431,21 @@ async def _await_entered(handler: _DummyAnthropicHandler, count: int) -> None:
         await handler.upstream_entered.wait_for(lambda: len(handler.upstream_enter_times) >= count)
 
 
-async def _drain_scheduler(iterations: int = 100) -> None:
-    """Give every runnable task ample opportunity to progress.
+def _queued_waiters(sem: asyncio.Semaphore) -> int:
+    """Number of tasks parked inside ``sem.acquire()``."""
+    return sum(1 for waiter in (sem._waiters or ()) if not waiter.cancelled())
 
-    A bounded number of event-loop turns, not a duration: a request that is
-    *able* to enter the upstream section will have done so long before this
-    returns, no matter how slow or how loaded the machine is.
+
+async def _await_queued_waiters(sem: asyncio.Semaphore, count: int) -> None:
+    """Block until ``count`` tasks are queued on ``sem``.
+
+    This is the handshake that makes the "has not entered yet" assertion
+    meaningful: it establishes *where* the (N+1)th request is parked rather
+    than merely giving it chances to run. Yielding until the waiter appears
+    has no iteration budget to get wrong; the enclosing ``anyio.fail_after``
+    turns a genuine deadlock into a failure.
     """
-    for _ in range(iterations):
+    while _queued_waiters(sem) < count:
         await asyncio.sleep(0)
 
 
@@ -448,8 +455,10 @@ def test_n_plus_one_contention_blocks_until_slot_frees(_iteration, stage_log_cap
 
     Contention is driven by coordination primitives, never by sleeps or
     millisecond thresholds: the two admitted requests are pinned inside the
-    upstream section until the test hands out a permit. Every assertion is
-    therefore structural (occupancy, ordering, semaphore state) and stays
+    upstream section until the test hands out a permit, and the third is
+    observed queued on the gate before its non-entry is asserted. Every
+    assertion is therefore structural (occupancy, ordering, semaphore
+    queue depth and final value) and stays
     valid under arbitrary scheduling pauses on a loaded CI runner. Do not
     reintroduce wall-clock bounds here, absolute *or* relative to another
     request's measured wait -- both fail when the loop delays all three
@@ -482,8 +491,12 @@ def test_n_plus_one_contention_blocks_until_slot_frees(_iteration, stage_log_cap
                 assert sem._value == 0
 
                 # The third request cannot enter while both slots are held.
+                # Wait until it is provably parked *inside* the gate before
+                # asserting non-entry, so the assertion cannot pass merely
+                # because the task had not reached ``acquire()`` yet.
                 tg.start_soon(handler.handle_anthropic_messages, reqs[2])
-                await _drain_scheduler()
+                await _await_queued_waiters(sem, 1)
+                assert _queued_waiters(sem) == 1
                 assert len(handler.upstream_enter_times) == 2, handler.upstream_enter_times
                 assert len(handler.upstream_exit_times) == 0, handler.upstream_exit_times
 
