@@ -7922,6 +7922,10 @@ class OpenAIHandlerMixin:
                                 RequestOutcome(
                                     # Per-emission ids keep dashboard request-log keys unique.
                                     request_id=await self._next_request_id(),
+                                    # ...while the PERF prefix stays the session
+                                    # id, so every line of one WS session is
+                                    # greppable together.
+                                    log_request_id=request_id,
                                     provider="openai",
                                     model=model_for_metrics,
                                     original_tokens=max(0, input_delta) + max(0, saved_delta),
@@ -8498,6 +8502,9 @@ class OpenAIHandlerMixin:
                     RequestOutcome(
                         # Per-emission ids keep dashboard request-log keys unique.
                         request_id=await self._next_request_id(),
+                        # ...while the PERF prefix stays the session id, so every
+                        # line of one WS session is greppable together.
+                        log_request_id=request_id,
                         provider="openai",
                         model=model_name,
                         original_tokens=residual_input_tokens + residual_tokens_saved,

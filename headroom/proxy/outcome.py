@@ -167,6 +167,15 @@ class RequestOutcome:
     tags: dict[str, str] = field(default_factory=dict)
     client: str | None = None
     project: str | None = None
+    # Optional override for the ``[id]`` prefix on the PERF log line only. The
+    # RequestLog row (effect 3) always keys off ``request_id``, which must be
+    # unique per emission or the dashboard's Alpine ``:key`` collides and blanks
+    # the feed (#310/#2164). A long-lived connection that emits many rows —
+    # today only the Codex ``/v1/responses`` WebSocket — therefore cannot also
+    # use ``request_id`` to keep its log lines greppable as one session. It sets
+    # this to the session id instead; every other caller leaves it ``None`` and
+    # the prefix stays ``request_id``.
+    log_request_id: str | None = None
 
     # ── Derived (computed once, no caching needed — properties are cheap) ─
 
@@ -564,8 +573,11 @@ async def emit_request_outcome(handler: Any, outcome: RequestOutcome) -> None:
     # compaction is already inside tok_saved and must not be added twice.
     tool_saved = tool_schema_saved_from_tags(outcome.tags or {})
     total_saved = headline_tokens_saved(outcome.tokens_saved, outcome.tags or {})
+    # The prefix identifies the connection an operator greps for, which is not
+    # always the per-row id — see ``RequestOutcome.log_request_id``.
+    log_prefix = outcome.log_request_id or outcome.request_id
     logger.info(
-        f"[{outcome.request_id}] PERF "
+        f"[{log_prefix}] PERF "
         f"model={outcome.model} msgs={outcome.num_messages} "
         f"tok_before={outcome.original_tokens} tok_after={outcome.optimized_tokens} "
         f"tok_saved={outcome.tokens_saved} "
