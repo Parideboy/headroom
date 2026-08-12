@@ -199,8 +199,29 @@ class AnthropicHandlerMixin:
     def _sort_tools_deterministically(
         cls, tools: list[dict[str, Any]] | None
     ) -> list[dict[str, Any]] | None:
-        """Return tools in deterministic order to preserve prompt-cache stability."""
+        """Return tools in deterministic order to preserve prompt-cache stability.
+
+        Skipped entirely when any tool carries ``cache_control``. A breakpoint on
+        a tool means "cache everything up to and including this one", so
+        reordering the array changes which tools are inside that prefix -- and
+        with two markers of different TTLs it can put the 1h one behind the 5m
+        one, which Anthropic rejects outright (#2939). The Rust proxy already
+        refuses for the same reason (``any_tool_has_cache_control`` in
+        ``crates/headroom-proxy/src/compression/live_zone_anthropic.rs``); this
+        is the Python side of that guard.
+
+        Clients that mark no tools -- the common case, and the one the sort was
+        written for -- are unaffected, so this costs nobody a cache bust.
+        """
         if not tools:
+            return tools
+        marked = sum(1 for t in tools if isinstance(t, dict) and t.get("cache_control"))
+        if marked:
+            logger.info(
+                "event=tool_sort_skipped reason=marker_present tool_count=%d marked=%d",
+                len(tools),
+                marked,
+            )
             return tools
         return sorted(tools, key=cls._tool_sort_key)
 
@@ -754,9 +775,22 @@ class AnthropicHandlerMixin:
             # transform runs; paired with the outbound count right before
             # forwarding (event=cache_breakpoints) so a dropped or moved
             # final breakpoint is self-diagnosing from proxy.log alone.
-            from headroom.proxy.helpers import count_cache_breakpoints
+            from headroom.proxy.helpers import (
+                CACHE_TTL_1H,
+                cache_control_ttl_lanes,
+                count_cache_breakpoints,
+            )
 
             inbound_breakpoints = count_cache_breakpoints(
+                body.get("system"), messages, body.get("tools")
+            )
+            # Which TTL lane did the CLIENT ask for on THIS turn? Claude Code
+            # picks 5m or 1h per request (a `/btw` side question drops to 5m and
+            # omits the extended-cache-ttl beta header even mid-1h-session), so
+            # this cannot be inferred from the session or from config. The
+            # pre-forward guard needs it to tell a breakpoint the client asked
+            # for from one an earlier turn's replayed bytes dragged in (#2939).
+            client_uses_1h = CACHE_TTL_1H in cache_control_ttl_lanes(
                 body.get("system"), messages, body.get("tools")
             )
 
@@ -3082,7 +3116,37 @@ class AnthropicHandlerMixin:
                         "upstream request for server-side retrieval handling"
                     )
 
-                from headroom.proxy.helpers import log_cache_breakpoints
+                # Last stop before the wire. Every transform, the tool sort, the
+                # tool-search deferral, CCR injection and the pipeline
+                # extensions have run, so this is the only place that can see
+                # the cache_control markers Anthropic will actually evaluate --
+                # and the ordering rule spans tools/system/messages, which no
+                # single transform is in a position to check (#2939).
+                from headroom.proxy.helpers import (
+                    enforce_cache_control_ttl_order,
+                    log_cache_breakpoints,
+                )
+
+                (
+                    _ttl_system,
+                    _ttl_messages,
+                    _ttl_tools,
+                    _ttl_stats,
+                ) = enforce_cache_control_ttl_order(
+                    body.get("system"),
+                    body.get("messages"),
+                    body.get("tools"),
+                    client_uses_1h=client_uses_1h,
+                    request_id=request_id,
+                )
+                if _ttl_stats["violation"]:
+                    if body.get("system") is not None:
+                        body["system"] = _ttl_system
+                    body["messages"] = _ttl_messages
+                    if body.get("tools") is not None:
+                        body["tools"] = _ttl_tools
+                    tools = _ttl_tools
+                    body_mutation_tracker.mark_mutated("cache_control_ttl_order")
 
                 log_cache_breakpoints(
                     request_id=request_id,
