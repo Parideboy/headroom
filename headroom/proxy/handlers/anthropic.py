@@ -73,6 +73,20 @@ def _strip_index_from_content_blocks(content: Any) -> None:
             _strip_index_from_content_blocks(block.get("content"))
 
 
+def _looks_like_sse_response(response: httpx.Response) -> bool:
+    """Return whether an upstream reply is a Server-Sent Events stream.
+
+    Trusts the declared content-type first and falls back to sniffing the
+    leading bytes for an SSE field, because a gateway in front of Anthropic may
+    relay the stream under a vaguer type.
+    """
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "text/event-stream" in content_type:
+        return True
+    head = response.content[:64].lstrip()
+    return head.startswith(b"event:") or head.startswith(b"data:")
+
+
 class AnthropicHandlerMixin:
     """Mixin providing Anthropic API handler methods for HeadroomProxy."""
 
@@ -1020,6 +1034,11 @@ class AnthropicHandlerMixin:
                     response_headers = dict(cached.response_headers)
                     response_headers.pop("content-encoding", None)
                     response_headers.pop("content-length", None)
+                    # Drop the stored content-type too. Starlette lets an
+                    # explicit header win over ``media_type``, so keeping the
+                    # producing request's type would let a cache entry hand this
+                    # caller a wire format it never asked for (#2952).
+                    response_headers.pop("content-type", None)
 
                     # Unit 4: release the pre-upstream semaphore on cache
                     # hit — no upstream call will happen.
@@ -3063,13 +3082,37 @@ class AnthropicHandlerMixin:
                 ccr_response_handler_enabled = bool(
                     self.ccr_response_handler and getattr(ccr_handler_config, "enabled", True)
                 )
-                buffered_stream_ccr = bool(
+                # A body carrying signed thinking blocks leaves as the client's
+                # original bytes (see ``select_outbound_body``), which throws
+                # away every edit made here — including the ``stream`` flip
+                # below. Taking the buffered path anyway asks upstream for a
+                # stream:true reply and then tries to read it as buffered JSON:
+                # the parse fails, SSE resynthesis is skipped, and the client
+                # gets a 200 with no usable body (#2952). The retrieve tool is
+                # itself an injected (and equally discarded) mutation on these
+                # turns, so the plain streaming path is the coherent choice.
+                from headroom.proxy.body_forwarding import outbound_body_is_client_bytes
+
+                outbound_locked_to_client_bytes = outbound_body_is_client_bytes(
+                    body=body,
+                    original_body_bytes=original_body_bytes,
+                )
+                wants_buffered_stream_ccr = bool(
                     stream
                     and ccr_response_handler_enabled
                     and self._has_headroom_retrieve_tool(
                         tools if tools is not None else body.get("tools")
                     )
                 )
+                buffered_stream_ccr = (
+                    wants_buffered_stream_ccr and not outbound_locked_to_client_bytes
+                )
+                if wants_buffered_stream_ccr and outbound_locked_to_client_bytes:
+                    logger.info(
+                        f"[{request_id}] CCR: signed thinking blocks force byte-faithful "
+                        "passthrough, so a stream:false flip could not reach upstream; "
+                        "using the plain streaming path instead of buffered retrieval"
+                    )
                 if buffered_stream_ccr:
                     if body.get("stream") is not False:
                         body["stream"] = False
@@ -3322,9 +3365,23 @@ class AnthropicHandlerMixin:
                         try:
                             resp_json = response.json()
                         except (json.JSONDecodeError, ValueError) as e:
-                            logger.debug(
-                                f"[{request_id}] Failed to parse response JSON for CCR handling: {e}"
-                            )
+                            # DEBUG is right for the buffered non-stream path, where
+                            # an unparseable body is just "no CCR handling". On the
+                            # buffered-stream path it means the reply came back in a
+                            # wire format we did not ask for, and every downstream
+                            # step (retrieval, SSE resynthesis, usage accounting)
+                            # silently no-ops — that has to be visible (#2952).
+                            if buffered_stream_ccr:
+                                logger.warning(
+                                    f"[{request_id}] CCR: buffered stream:false request got a "
+                                    f"non-JSON {response.status_code} reply "
+                                    f"(content-type={response.headers.get('content-type')!r}): {e}"
+                                )
+                            else:
+                                logger.debug(
+                                    f"[{request_id}] Failed to parse response JSON for CCR "
+                                    f"handling: {e}"
+                                )
 
                         # CCR Response Handling: Handle headroom_retrieve tool calls automatically
                         if (
@@ -3652,7 +3709,13 @@ class AnthropicHandlerMixin:
                         # Cache response under the SAME key it was looked up by:
                         # cache_lookup_messages is the raw pre-mutation snapshot, not
                         # the live (compressed/hooked) `messages` (#327).
-                        if self.cache and response.status_code == 200:
+                        # ``resp_json`` is None when the reply did not parse as
+                        # JSON — an SSE stream, most often. Caching those bytes
+                        # poisons the entry for every later caller that shares
+                        # the key: the cache key has no ``stream`` component, so
+                        # a buffered request would be answered with a stream it
+                        # cannot read (#2952).
+                        if self.cache and response.status_code == 200 and resp_json is not None:
                             await self.cache.set(
                                 cache_lookup_messages,
                                 model,
@@ -3814,6 +3877,44 @@ class AnthropicHandlerMixin:
                                 logger.warning(
                                     f"[{request_id}] Security response scan error: {sec_err}"
                                 )
+
+                        if (
+                            buffered_stream_ccr
+                            and response.status_code == 200
+                            and not resp_json
+                            and _looks_like_sse_response(response)
+                        ):
+                            # Upstream streamed instead of buffering, so there is
+                            # nothing to resynthesize — but the client asked for a
+                            # stream and this already is one. Relay it verbatim
+                            # rather than falling through to a plain Response the
+                            # _BufferedCCRResponse wrapper can only turn into a bare
+                            # error event (#2952).
+                            logger.warning(
+                                f"[{request_id}] CCR: relaying the upstream SSE reply verbatim; "
+                                "server-side retrieval was skipped for this turn"
+                            )
+                            relay_headers = {
+                                k: v
+                                for k, v in response_headers.items()
+                                if k.lower()
+                                not in (
+                                    "content-encoding",
+                                    "content-length",
+                                    "transfer-encoding",
+                                    "content-type",
+                                )
+                            }
+                            relayed_sse = response.content
+
+                            async def _upstream_sse_relay():
+                                yield relayed_sse
+
+                            return StreamingResponse(
+                                _upstream_sse_relay(),
+                                media_type="text/event-stream",
+                                headers=relay_headers,
+                            )
 
                         if buffered_stream_ccr and response.status_code == 200 and resp_json:
                             sse_headers = {

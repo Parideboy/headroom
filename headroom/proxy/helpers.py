@@ -326,12 +326,18 @@ def log_outbound_request(
     mutation_reasons: list[str],
     request_id: str | None,
     source: str,
+    dropped_mutation_reasons: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Structured log line for every outbound forwarder call.
 
     Per realignment build constraints: every cache-affecting decision is
     logged. Never includes ``Authorization``/``x-api-key`` content or full
     body bytes.
+
+    ``dropped_mutation_reasons`` records edits that byte-faithful passthrough
+    discarded before the wire. That is a WARNING, not a detail: the line above
+    reports the transforms Headroom *decided* on, and without this the operator
+    reads savings and injections that the upstream never saw.
     """
     logger.info(
         "event=outbound_request forwarder=%s method=%s path=%s body_bytes=%d "
@@ -345,6 +351,16 @@ def log_outbound_request(
         source,
         request_id or "",
     )
+    if dropped_mutation_reasons:
+        logger.warning(
+            "event=outbound_body_mutations_dropped forwarder=%s source=%s "
+            "dropped_mutation_reasons=%s request_id=%s (signed thinking blocks force "
+            "byte-faithful passthrough, so these body edits did NOT reach upstream)",
+            forwarder,
+            source,
+            ",".join(dropped_mutation_reasons),
+            request_id or "",
+        )
 
 
 def count_cache_breakpoints(
