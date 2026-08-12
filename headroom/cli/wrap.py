@@ -1713,6 +1713,18 @@ def _serena_project_skip_reason(root: Path) -> str | None:
     Serena's own ``~/.serena`` config directory. A linked git worktree (its
     top-level ``.git`` is a file, not a directory) is an ephemeral checkout that
     would pay for its own index at a path that soon disappears.
+
+    A project with no ``.serena/project.yml`` is skipped because the pre-index
+    cannot succeed there (#2938). ``serena project index`` auto-creates the file
+    when it is missing, and that auto-creation calls
+    ``ProjectConfig.autogenerate(interactive=True)``, which asks one ``[y/N]``
+    question per additionally-detected language server. The CLI has no
+    non-interactive switch; the only way to reach the silent branch is to pass
+    ``--ls/--language`` explicitly, which means Headroom guessing the project's
+    languages again — exactly the hand-maintained map removed below. Serena's
+    MCP server generates that file itself (non-interactively) on first start and
+    indexes lazily on demand, so the pre-index simply resumes from the next
+    wrap onwards.
     """
     try:
         resolved = root.resolve()
@@ -1723,24 +1735,108 @@ def _serena_project_skip_reason(root: Path) -> str | None:
         return "$HOME is not a project"
     if (resolved / ".git").is_file():
         return "linked git worktree"
+    if not (resolved / ".serena" / "project.yml").is_file():
+        return "no .serena/project.yml yet — Serena will create it and index on demand"
     return None
+
+
+#: Upper bound on the synchronous pre-index. The agent does not launch until
+#: this call returns, so the number is a stall budget, not just a safety net.
+_SERENA_INDEX_TIMEOUT = 300
+
+
+def _kill_serena_index_tree(proc: subprocess.Popen) -> None:
+    """Kill *proc* and everything it spawned (best-effort, never raises).
+
+    ``uvx`` is a launcher: it resolves the environment and then runs the real
+    ``serena`` executable as a grandchild. Killing only the direct child leaves
+    that grandchild alive and reparented to PID 1, so every timed-out pre-index
+    leaked one process that never exits (#2938 — the same failure mode as #615
+    and #880). The child is started in its own process group precisely so the
+    whole tree can be signalled here.
+    """
+    if sys.platform == "win32":
+        # Windows has no process groups to signal for an already-wedged child;
+        # ``taskkill /T`` walks the tree by parent PID instead. ``/F`` because a
+        # process blocked in a read will not act on a graceful close request.
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+    # Backstop: if the tree kill above did not land, at least the direct child
+    # goes. Then reap so the parent does not leave a zombie behind, and close
+    # the capture pipes we opened so the wrap does not carry stray fds into the
+    # agent it is about to exec.
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
 
 
 def _index_serena_project(*, verbose: bool = False) -> None:
     """Warm Serena's symbol cache for the current project (non-fatal).
 
-    Runs ``serena project index`` (the same ``uvx --from git+…`` launch used to
-    start the MCP server) in the project directory so the first symbol query is
-    not paying for a cold index. Timeout-guarded and best-effort: Serena also
-    indexes lazily on demand, so a failure or timeout here never blocks the
-    wrap.
+    Runs ``serena project index`` (the same ``uvx --from serena-agent`` launch
+    used to start the MCP server) in the project directory so the first symbol
+    query is not paying for a cold index. Serena also indexes lazily on demand,
+    so any failure here is survivable.
+
+    This runs on the launch path, synchronously: the agent starts only once it
+    returns, so the timeout below is time the user spends staring at nothing.
+    Two guards keep that bounded (#2938):
+
+    * ``stdin`` is ``DEVNULL``. Serena prompts when it has to auto-create
+      ``project.yml``, and because stdout is captured the question never
+      reaches the terminal — an inherited stdin turned that into a silent,
+      full-timeout hang. EOF makes it fail in about a second instead.
+      ``_serena_project_skip_reason`` already keeps us out of that state; this
+      is the belt-and-braces half, and it covers any future Serena prompt too.
+    * The child gets its own process group so ``_kill_serena_index_tree`` can
+      take out the ``uvx`` grandchild on timeout rather than orphaning it.
     """
     if shutil.which("uvx") is None:
         if verbose:
             click.echo("  Serena: uvx not found — skipping pre-index")
         return
+
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        # ``subprocess.Popen`` directly, so the encoding defaults that
+        # ``headroom._subprocess.run`` applies have to be repeated here.
+        "encoding": "utf-8",
+        "errors": "replace",
+        "cwd": str(Path.cwd()),
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
     try:
-        result = run(
+        proc = subprocess.Popen(
             [
                 "uvx",
                 # PyPI (prebuilt wheels), not the git source that fails to build
@@ -1751,20 +1847,32 @@ def _index_serena_project(*, verbose: bool = False) -> None:
                 "project",
                 "index",
             ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=str(Path.cwd()),
+            **popen_kwargs,
         )
-        if result.returncode == 0:
-            click.echo("  Serena: project pre-indexed (symbol cache warmed)")
-        elif verbose:
-            click.echo(f"  Serena: pre-index failed ({(result.stderr or '')[:100]})")
-    except subprocess.TimeoutExpired:
-        click.echo("  Serena: pre-index timed out (will index on demand)")
     except Exception as e:
         if verbose:
             click.echo(f"  Serena: pre-index skipped ({e})")
+        return
+
+    # Announce the wait. Indexing a large repo legitimately takes minutes and
+    # the output is captured, so without this line the wrap looks hung.
+    click.echo("  Serena: pre-indexing project (first run can take a while)…")
+    try:
+        _stdout, stderr = proc.communicate(timeout=_SERENA_INDEX_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_serena_index_tree(proc)
+        click.echo("  Serena: pre-index timed out (will index on demand)")
+        return
+    except Exception as e:
+        _kill_serena_index_tree(proc)
+        if verbose:
+            click.echo(f"  Serena: pre-index skipped ({e})")
+        return
+
+    if proc.returncode == 0:
+        click.echo("  Serena: project pre-indexed (symbol cache warmed)")
+    elif verbose:
+        click.echo(f"  Serena: pre-index failed ({(stderr or '')[:100]})")
 
 
 def _setup_serena_mcp(
@@ -1831,7 +1939,9 @@ def _setup_serena_mcp(
 
     # Serena is the active engine here (we passed the detect/uvx guards): steer
     # the agent toward symbol-level tools, then warm the symbol cache. Both are
-    # best-effort and non-fatal — neither blocks the wrap.
+    # best-effort and non-fatal, but the pre-index is *synchronous* — the agent
+    # does not launch until it returns or hits ``_SERENA_INDEX_TIMEOUT``. See
+    # ``_index_serena_project`` for how that wait is kept bounded and visible.
     #
     # Headroom no longer writes ``.serena/project.yml`` language scoping. Serena
     # determines the project's languages itself during
