@@ -141,7 +141,14 @@ def format_retrieval_miss_detail(status: dict[str, Any]) -> str:
             )
         return f"Entry expired and was purged (CCR idle TTL: {ttl_seconds} seconds)"
 
-    return f"Entry not found (CCR idle TTL: {default_ttl} seconds)"
+    # No tombstone either. That is not proof the hash was never stored: reasons
+    # are process-local (see CompressionStore._tombstones), so a backend sweep
+    # in another worker, or any purge that happened before this process started,
+    # leaves none behind. Name both possibilities rather than implying the first.
+    return (
+        "Entry not found - never stored, or expired/evicted with no reason "
+        f"recorded (CCR idle TTL: {default_ttl} seconds)"
+    )
 
 
 def _redact_retrieval_log_payload(payload: str) -> str:
@@ -340,6 +347,16 @@ class CompressionStore:
         # miss can say "expired" / "evicted for capacity" instead of the
         # indistinguishable "not found" that #2604 reported. Bounded ring —
         # this is diagnostics, not state.
+        #
+        # Best-effort by construction, and deliberately so: a reason is only
+        # recorded when *this* store instance performs the deletion. The
+        # backend also drops expired rows on its own — SQLiteBackend._open()
+        # sweeps at startup and _maybe_purge() sweeps on write — and a process
+        # restart takes the whole ring with it. Those misses degrade to a plain
+        # "not found", which format_retrieval_miss_detail() reports as
+        # ambiguous. Persisting reasons would need backend support every
+        # backend can opt out of (Redis/Mongo load by entry point), so the
+        # honest wording is required regardless; see the follow-up issue.
         self._tombstones: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._max_tombstones = 512
 

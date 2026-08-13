@@ -176,7 +176,10 @@ Check the effective setting at `/v1/retrieve/stats` under
 When retrieval misses, the error says why: `Entry expired (CCR idle TTL: ...)` means the
 entry went untouched too long (raise `HEADROOM_CCR_TTL_SECONDS`), while
 `Entry evicted for capacity` means the store hit its entry limit (raise
-`store_max_entries`). `Entry not found` means the hash was never stored by this store.
+`store_max_entries`). Those reasons are best-effort: the store remembers why it removed a
+hash, but not why the storage backend did. A plain `Entry not found` therefore means either
+the hash was never stored, or it was expired/evicted by a backend sweep or by an earlier
+proxy process, which leaves no reason behind.
 
 ## Message-level CCR
 
