@@ -222,6 +222,11 @@ def _build_env(home: Path, tmp_path: Path) -> dict[str, str]:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["PATH"] = str(shim_dir) + os.pathsep + env.get("PATH", "")
+    # The Windows installer persists the install dir to the user PATH in the
+    # registry, which HOME/USERPROFILE overrides cannot sandbox: without this the
+    # tmp_path shim dir stays on the real PATH after the test and shadows the
+    # user's own headroom install.
+    env["HEADROOM_INSTALL_SKIP_PATH"] = "1"
     env["FAKE_DOCKER_STATE"] = str(tmp_path / "fake-docker-state.json")
     env["FAKE_DOCKER_LOG"] = str(tmp_path / "fake-docker.log")
     return env
@@ -553,6 +558,32 @@ def test_bash_native_installer_supports_persistent_docker_lifecycle(tmp_path: Pa
 
 def _powershell_executable() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+
+
+def _read_user_path_entry() -> tuple[str, int] | None:
+    """Read the raw ``HKCU\\Environment`` PATH value and its registry kind, if it exists."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            value, kind = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return None
+    return str(value), int(kind)
+
+
+def _restore_user_path_entry(previous: tuple[str, int] | None) -> None:
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
+        if previous is None:
+            try:
+                winreg.DeleteValue(key, "Path")
+            except FileNotFoundError:
+                pass
+            return
+        value, kind = previous
+        winreg.SetValueEx(key, "Path", 0, kind, value)
 
 
 @pytest.mark.skipif(
@@ -911,3 +942,49 @@ def test_powershell_native_installer_supports_persistent_docker_lifecycle(tmp_pa
         assert not manifest_path.parent.exists()
     finally:
         _cleanup_fake_docker(env)
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or _powershell_executable() is None,
+    reason="Windows PowerShell coverage runs on Windows hosts only",
+)
+def test_powershell_native_installer_leaves_the_real_user_path_untouched(tmp_path: Path) -> None:
+    """The installer must not persist a throwaway install dir to the real user PATH.
+
+    That PATH lives in ``HKCU\\Environment``, so a HOME/USERPROFILE override cannot contain it.
+    Without the ``HEADROOM_INSTALL_SKIP_PATH`` guard honoured by ``Ensure-PathEntry``, every run
+    of the installer tests prepended this ``tmp_path`` shim dir to the developer's own PATH, where
+    it outlived the test and shadowed their real headroom install.
+    """
+    powershell = _powershell_executable()
+    assert powershell is not None
+
+    home = tmp_path / "home"
+    (home / ".local").mkdir(parents=True)
+    env = _build_env(home, tmp_path)
+    env["HEADROOM_DOCKER_IMAGE"] = "headroom:test-image"
+
+    before = _read_user_path_entry()
+    try:
+        _run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(REPO_ROOT / "scripts" / "install.ps1"),
+            ],
+            env=env,
+            cwd=REPO_ROOT,
+        )
+
+        after = _read_user_path_entry()
+        assert str(home) not in (after[0] if after else "")
+        assert after == before
+    finally:
+        _cleanup_fake_docker(env)
+        # A passing run never writes to the registry; this only fires if the guard regresses, so
+        # that a failing test cannot leave the developer's PATH polluted.
+        if _read_user_path_entry() != before:
+            _restore_user_path_entry(before)

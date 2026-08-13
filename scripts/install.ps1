@@ -22,6 +22,14 @@ function Require-Command {
 function Ensure-PathEntry {
     param([string]$PathEntry)
 
+    # The persistent user PATH lives in the registry, so it is not affected by a
+    # HOME/USERPROFILE override. Callers that install into a throwaway home (the
+    # test suite, sandboxes) set HEADROOM_INSTALL_SKIP_PATH so the entry is not
+    # written to the real user's environment, where it would outlive the install.
+    if ($env:HEADROOM_INSTALL_SKIP_PATH) {
+        return
+    }
+
     $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @()
     if ($currentPath) {
