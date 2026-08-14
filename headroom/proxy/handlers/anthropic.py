@@ -36,7 +36,11 @@ from headroom.proxy.auth_mode import (
 from headroom.proxy.compression_decision import CompressionDecision
 from headroom.proxy.forwarded_headers import resolve_client_ip
 from headroom.proxy.handlers._debug_dump import _debug_dump_mode, _redact_debug_value
-from headroom.proxy.helpers import extract_tags, relocate_system_messages_to_top_level
+from headroom.proxy.helpers import (
+    extract_tags,
+    relocate_system_messages_to_top_level,
+    sanitize_forwarded_response_headers,
+)
 from headroom.proxy.image_isolation import run_image_compression_isolated
 from headroom.proxy.memory_decision import MemoryDecision
 from headroom.proxy.memory_query import MemoryQuery
@@ -1176,15 +1180,32 @@ class AnthropicHandlerMixin:
                         )
                     )
 
-                    # Remove compression headers from cached response
-                    response_headers = dict(cached.response_headers)
-                    response_headers.pop("content-encoding", None)
-                    response_headers.pop("content-length", None)
-                    # Drop the stored content-type too. Starlette lets an
-                    # explicit header win over ``media_type``, so keeping the
-                    # producing request's type would let a cache entry hand this
-                    # caller a wire format it never asked for (#2952).
-                    response_headers.pop("content-type", None)
+                    # Strip the stored response's wire-framing headers. The
+                    # entry carries whatever the *producing* upstream sent,
+                    # and replaying that framing over a different connection
+                    # breaks the body: a stale ``transfer-encoding: chunked``
+                    # makes the client parse plain JSON as chunked frames and
+                    # read nothing out of an HTTP 200 (#3019). ``content-type``
+                    # goes too, because Starlette lets an explicit header win
+                    # over ``media_type`` and the producing request's type
+                    # would hand this caller a wire format it never asked
+                    # for (#2952).
+                    response_headers = sanitize_forwarded_response_headers(
+                        cached.response_headers,
+                        "content-type",
+                    )
+
+                    # A cache hit answers the client without touching the
+                    # upstream, so it emits no outbound_request line and no
+                    # upstream stage timings. Without this log a served-from-
+                    # cache turn is indistinguishable from a turn that died
+                    # silently, which is exactly how #3019 stayed invisible.
+                    logger.info(
+                        f"[{request_id}] RESPONSE-CACHE-HIT: model={model} "
+                        f"bytes={len(cached.response_body)} "
+                        f"age_s={(datetime.now() - cached.created_at).total_seconds():.0f} "
+                        f"hits={cached.hit_count}"
+                    )
 
                     # Unit 4: release the pre-upstream semaphore on cache
                     # hit — no upstream call will happen.
@@ -3991,7 +4012,24 @@ class AnthropicHandlerMixin:
                         # the key: the cache key has no ``stream`` component, so
                         # a buffered request would be answered with a stream it
                         # cannot read (#2952).
-                        if self.cache and response.status_code == 200 and resp_json is not None:
+                        #
+                        # ``not stream`` mirrors the read gate at the cache
+                        # lookup above. ``stream`` still holds the *client's*
+                        # original flag here — the buffered-CCR conversion
+                        # flips ``body["stream"]``, never this variable — so a
+                        # turn the client asked to stream is the one case that
+                        # can reach this store site with a buffered body. That
+                        # body was shaped by a forced ``stream: false`` flip
+                        # plus CCR tool injection, and the key cannot tell it
+                        # apart from an ordinary non-streaming reply, so
+                        # storing it lets a later caller be answered with a
+                        # response built for a request it never made (#3019).
+                        if (
+                            self.cache
+                            and not stream
+                            and response.status_code == 200
+                            and resp_json is not None
+                        ):
                             await self.cache.set(
                                 cache_lookup_messages,
                                 model,

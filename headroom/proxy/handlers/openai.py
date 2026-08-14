@@ -28,6 +28,7 @@ from headroom.proxy.helpers import (
     _headroom_bypass_enabled,
     extract_tags,
     jitter_delay_ms,
+    sanitize_forwarded_response_headers,
 )
 from headroom.proxy.loopback_guard import is_loopback_host
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
@@ -327,10 +328,10 @@ def _sanitize_forwarded_response_headers(
     headers: httpx.Headers | dict[str, str],
     *extra_names: str,
 ) -> dict[str, str]:
-    cleaned = dict(headers)
-    for name in ("content-encoding", "content-length", "server", *extra_names):
-        cleaned.pop(name, None)
-    return cleaned
+    # Thin alias kept for the many call sites in this module; the policy
+    # (and the list of framing headers) lives in one place so the Anthropic
+    # handler strips exactly the same set — see #3019.
+    return sanitize_forwarded_response_headers(headers, *extra_names)
 
 
 def _resolve_openai_handler_path(
@@ -3273,10 +3274,34 @@ class OpenAIHandlerMixin:
                     )
                 )
 
-                # Remove compression headers from cached response
-                response_headers = _sanitize_forwarded_response_headers(cached.response_headers)
+                # Strip the stored response's wire-framing headers, and its
+                # content-type: the entry carries whatever the *producing*
+                # upstream sent, and replaying that framing over a different
+                # connection breaks the body — a stale
+                # ``transfer-encoding: chunked`` makes the client parse plain
+                # JSON as chunked frames and read nothing out of an HTTP 200
+                # (#3019, same reasoning as #2952 on the Anthropic twin).
+                response_headers = _sanitize_forwarded_response_headers(
+                    cached.response_headers,
+                    "content-type",
+                )
 
-                return Response(content=cached.response_body, headers=response_headers)
+                # A cache hit answers without touching the upstream, so it
+                # emits no outbound_request line and no upstream stage
+                # timings. Log it, or a served-from-cache turn looks exactly
+                # like a turn that died silently (#3019).
+                logger.info(
+                    f"[{request_id}] RESPONSE-CACHE-HIT: model={model} "
+                    f"bytes={len(cached.response_body)} "
+                    f"age_s={(datetime.now() - cached.created_at).total_seconds():.0f} "
+                    f"hits={cached.hit_count}"
+                )
+
+                return Response(
+                    content=cached.response_body,
+                    headers=response_headers,
+                    media_type="application/json",
+                )
 
         # Token counting (offloaded off the event loop — GH #1701)
         tokenizer, original_tokens = await self._count_tokens_offloaded(model, messages)
@@ -4810,7 +4835,16 @@ class OpenAIHandlerMixin:
                 # Cache response under the SAME key it was looked up by:
                 # cache_lookup_messages is the raw pre-mutation snapshot, not
                 # the live (hooked) `messages` (#327).
-                if self.cache and response.status_code == 200:
+                #
+                # ``not stream`` mirrors the read gate at the cache lookup
+                # above. It is currently redundant here — a streaming chat
+                # request returns via ``_stream_response`` well before this
+                # point — but the Anthropic handler had the same shape until a
+                # buffered-CCR branch started falling through to its store
+                # site, which let a response built for a stream:true request
+                # answer a later non-streaming caller (#3019). Stating the
+                # invariant keeps that from being reintroduced silently.
+                if self.cache and not stream and response.status_code == 200:
                     await self.cache.set(
                         cache_lookup_messages,
                         model,
