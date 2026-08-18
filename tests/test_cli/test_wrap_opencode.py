@@ -1055,6 +1055,114 @@ def test_wrap_opencode_with_no_proxy(
     assert result.exit_code == 0, result.output
 
 
+def test_wrap_opencode_with_openai_api_url(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--openai-api-url is forwarded to _ensure_proxy so third-party OpenAI-compatible
+    providers (e.g. DeepSeek) are reached instead of the default OpenAI upstream."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
+    _set_test_home(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_ensure_proxy(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured.update(kwargs)
+        return None, 9000
+
+    with (
+        patch.object(wrap_mod.shutil, "which", return_value="opencode"),
+        patch.object(wrap_mod, "_ensure_proxy", side_effect=fake_ensure_proxy),
+        patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "wrap",
+                "opencode",
+                "--port",
+                "9000",
+                "--openai-api-url",
+                "https://api.deepseek.com/v1",
+                "--no-mcp",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["openai_api_url"] == "https://api.deepseek.com/v1"
+
+
+def test_wrap_opencode_without_openai_api_url_defaults_to_none(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting --openai-api-url leaves the upstream selection to _ensure_proxy's
+    default (OpenAI), matching behavior before this flag existed."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
+    _set_test_home(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_ensure_proxy(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured.update(kwargs)
+        return None, 9000
+
+    with (
+        patch.object(wrap_mod.shutil, "which", return_value="opencode"),
+        patch.object(wrap_mod, "_ensure_proxy", side_effect=fake_ensure_proxy),
+        patch.object(wrap_mod, "_launch_tool", side_effect=SystemExit(0)),
+    ):
+        result = runner.invoke(main, ["wrap", "opencode", "--port", "9000", "--no-mcp"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["openai_api_url"] is None
+
+
+def test_wrap_opencode_help_lists_openai_api_url(runner: CliRunner) -> None:
+    """--openai-api-url is scoped to `wrap opencode`, not other wrap subcommands."""
+    opencode_help = runner.invoke(main, ["wrap", "opencode", "--help"])
+    codex_help = runner.invoke(main, ["wrap", "codex", "--help"])
+
+    assert opencode_help.exit_code == 0, opencode_help.output
+    assert "--openai-api-url URL" in opencode_help.output
+    assert codex_help.exit_code == 0, codex_help.output
+    assert "--openai-api-url" not in codex_help.output
+
+
+def test_wrap_opencode_openai_api_url_conflicts_with_copilot_subscription(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--openai-api-url and --copilot-subscription pick different, incompatible
+    upstream-selection strategies, so combining them must fail fast."""
+    monkeypatch.chdir(tmp_path)
+    _set_test_home(monkeypatch, tmp_path)
+    _clear_copilot_route_config(monkeypatch)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}", encoding="utf-8")
+
+    with patch.object(wrap_mod, "_ensure_proxy", side_effect=AssertionError("proxy launched")):
+        result = runner.invoke(
+            main,
+            [
+                "wrap",
+                "opencode",
+                "--copilot-subscription",
+                "--openai-api-url",
+                "https://api.deepseek.com/v1",
+                "--no-mcp",
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "--openai-api-url" in result.output
+    assert not config_file.with_name("opencode.json.headroom-backup").exists()
+
+
 def test_wrap_opencode_with_verbose_flag(
     runner: CliRunner,
     tmp_path: Path,

@@ -193,9 +193,15 @@ API key to the proxy, and the proxy forwards it to DeepSeek. Make sure
 
 ### Models appear but requests fail
 
-You ran `headroom wrap opencode`. That command replaces your config with Claude
-and GPT models. **Do not use `headroom wrap`.** Configure OpenCode manually as
-shown above, and launch OpenCode directly with `opencode`.
+If you ran `headroom wrap opencode` without `--openai-api-url`, OpenAI-compatible
+traffic is forwarded to OpenAI's own API by default, so your DeepSeek key is
+rejected with an HTTP 401 error. Two fixes:
+
+- Add the flag so the proxy is started with the right upstream:
+  `headroom wrap opencode --openai-api-url https://api.deepseek.com/v1`
+- Or fall back to the manual setup shown above (`headroom proxy --openai-api-url
+  https://api.deepseek.com/v1` plus the `opencode.json` edits), and launch
+  OpenCode directly with `opencode`.
 
 ### "headroom" command not found
 
@@ -223,7 +229,10 @@ shaper is active immediately — the numbers just need calibration.
 ## What's NOT in this guide
 
 - **Claude or GPT models** — this setup uses DeepSeek exclusively
-- **`headroom wrap`** — do not use it; it overrides the config
+- **Every moving part of the manual setup** — this guide documents the manual
+  path deliberately, step by step, so you can see exactly what gets configured.
+  `headroom wrap opencode --openai-api-url https://api.deepseek.com/v1` is now
+  also a supported shortcut that automates the same config-injection steps.
 - **Deprecated model names** — `deepseek-chat` and `deepseek-reasoner` are
   compatibility aliases that will be deprecated on 2026-07-24; use
   `deepseek-v4-pro` and `deepseek-v4-flash` instead

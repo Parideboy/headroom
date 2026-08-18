@@ -7215,6 +7215,16 @@ def openclaw(
 )
 @click.option("--no-proxy", is_flag=True, help="Skip proxy startup (use existing proxy)")
 @click.option(
+    "--openai-api-url",
+    metavar="URL",
+    help=(
+        "Base URL of the actual OpenAI-compatible provider you are using, for example "
+        "DeepSeek's https://api.deepseek.com/v1. Set this when OpenCode is configured for "
+        "a provider other than OpenAI; without it, requests are forwarded to OpenAI's own "
+        "API by default and a non-OpenAI API key is rejected with an HTTP 401 error."
+    ),
+)
+@click.option(
     "--copilot-subscription",
     is_flag=True,
     help="Route headroom/* models through the authenticated GitHub Copilot subscription",
@@ -7235,6 +7245,7 @@ def opencode(
     no_serena: bool,
     code_graph: bool,
     no_proxy: bool,
+    openai_api_url: str | None,
     copilot_subscription: bool,
     learn: bool,
     memory: bool,
@@ -7253,6 +7264,13 @@ def opencode(
     Also sets OPENAI_BASE_URL and ANTHROPIC_BASE_URL as fallbacks.
 
     \b
+    By default, OpenAI-compatible traffic is forwarded to OpenAI's own API.
+    If OpenCode is configured to use a different OpenAI-compatible provider
+    (for example DeepSeek), pass that provider's base URL via
+    --openai-api-url so requests and your existing API key reach the right
+    upstream instead of being rejected by OpenAI with an HTTP 401 error.
+
+    \b
     Examples:
         headroom wrap opencode                         # Start proxy + opencode
         headroom wrap opencode -- "fix the bug"        # Pass prompt to opencode
@@ -7261,6 +7279,7 @@ def opencode(
         headroom wrap opencode --port 9999             # Custom proxy port
         headroom wrap opencode --backend anyllm --anyllm-provider groq
         headroom wrap opencode --copilot-subscription # Use a GitHub Copilot subscription
+        headroom wrap opencode --openai-api-url https://api.deepseek.com/v1
     """
     subscription_resolution = None
     if copilot_subscription:
@@ -7279,6 +7298,11 @@ def opencode(
             raise click.ClickException(
                 "--copilot-subscription cannot be combined with --prepare-only because "
                 "it requires a running private seeded proxy."
+            )
+        if openai_api_url:
+            raise click.ClickException(
+                "--copilot-subscription cannot be combined with --openai-api-url because "
+                "the Copilot subscription flow already selects its own upstream API URL."
             )
         subscription_resolution = _require_copilot_subscription_resolution()
 
@@ -7357,7 +7381,9 @@ def opencode(
         backend=backend,
         anyllm_provider=anyllm_provider,
         region=region,
-        openai_api_url=(subscription_resolution.api_url if subscription_resolution else None),
+        openai_api_url=(
+            openai_api_url or (subscription_resolution.api_url if subscription_resolution else None)
+        ),
         copilot_api_token=(subscription_resolution.token if subscription_resolution else None),
         copilot_refresh_oauth_token=(
             subscription_resolution.refresh_oauth_token if subscription_resolution else None

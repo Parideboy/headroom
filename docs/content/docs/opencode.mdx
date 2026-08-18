@@ -41,6 +41,7 @@ headroom wrap opencode \
   --no-serena \
   --code-graph \
   --no-proxy \
+  --openai-api-url https://api.deepseek.com/v1 \
   --learn \
   --memory \
   --backend anthropic \
@@ -48,6 +49,13 @@ headroom wrap opencode \
   --region ... \
   -- <opencode args>
 ```
+
+Pass `--openai-api-url` when OpenCode should route through a third-party
+OpenAI-compatible provider instead of OpenAI itself — for example DeepSeek's
+`https://api.deepseek.com/v1`. Without it, OpenAI-compatible traffic is
+forwarded to OpenAI's own API by default, and a non-OpenAI API key is
+rejected with an HTTP 401 error. See
+[OpenCode + DeepSeek](/docs/opencode-deepseek) for a full walkthrough.
 
 ## Provider Model Mapping
 
