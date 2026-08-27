@@ -173,3 +173,58 @@ def test_main_prints_the_drift_state() -> None:
         )
         == 0
     )
+
+
+def test_drift_state_is_unknown_when_the_base_file_comparison_failed() -> None:
+    module = _load_module()
+    payload = {
+        "mergeStateStatus": "CLEAN",
+        "files": [{"path": "headroom/proxy/server.py"}],
+    }
+
+    assert module.drift_state(payload, 13, None) == "unknown"
+
+
+def test_drift_state_is_current_when_the_base_moved_no_files() -> None:
+    module = _load_module()
+    payload = {
+        "mergeStateStatus": "CLEAN",
+        "files": [{"path": "headroom/proxy/server.py"}],
+    }
+
+    assert module.drift_state(payload, 13, []) == "current"
+
+
+def test_parse_base_files_reads_a_failed_comparison_as_unknown() -> None:
+    module = _load_module()
+
+    assert module.parse_base_files("") is None
+    assert module.parse_base_files("   ") is None
+    assert module.parse_base_files("not json") is None
+    assert module.parse_base_files('{"files": []}') is None
+    assert module.parse_base_files("[]") == []
+    assert module.parse_base_files('["headroom/proxy/server.py"]') == ["headroom/proxy/server.py"]
+
+
+def test_main_prints_unknown_when_the_base_file_comparison_failed(capsys) -> None:
+    module = _load_module()
+    state_json = json.dumps(
+        {"mergeStateStatus": "CLEAN", "files": [{"path": "headroom/proxy/server.py"}]}
+    )
+
+    assert (
+        module.main(
+            [
+                "--state-json",
+                state_json,
+                "--field",
+                "drift",
+                "--behind-by",
+                "13",
+                "--base-files",
+                "",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "unknown"

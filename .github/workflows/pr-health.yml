@@ -218,10 +218,15 @@ jobs:
             merge_base="$(jq -r '.merge_base // ""' <<<"$head_compare")"
 
             # Files the base branch changed since this pull request forked off it.
+            # An empty string means the comparison never produced an answer; it must
+            # not read as "the base moved nothing", which would clear a correct label.
             base_files='[]'
-            if [[ -n "$merge_base" && -n "$behind_by" && "$behind_by" != "0" ]]; then
-              base_files="$(gh api "repos/$REPO/compare/$merge_base...$base_ref" \
-                --jq '[.files[]? | .filename]' 2>/dev/null || echo '[]')"
+            if [[ -n "$behind_by" && "$behind_by" != "0" ]]; then
+              base_files=''
+              if [[ -n "$merge_base" ]]; then
+                base_files="$(gh api "repos/$REPO/compare/$merge_base...$base_ref" \
+                  --jq '[.files[]? | .filename]' 2>/dev/null)" || base_files=''
+              fi
             fi
 
             drift="$(python3 .github/scripts/pr-health-labels.py \

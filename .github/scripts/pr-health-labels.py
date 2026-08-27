@@ -72,10 +72,23 @@ def parse_behind_by(value: str) -> int | None:
         return None
 
 
+def parse_base_files(value: str) -> list[str] | None:
+    """Read the compared file list from a compare call that may have failed."""
+    if not value or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return [str(item) for item in parsed]
+
+
 def drift_state(
     payload: dict[str, Any],
     behind_by: int | None,
-    base_files: Iterable[Any],
+    base_files: Iterable[Any] | None,
 ) -> str:
     """Classify a pull request branch against the current tip of its base branch.
 
@@ -85,7 +98,10 @@ def drift_state(
     being behind on files the pull request also modifies, because that is where a
     semantic merge conflict hides from per-pull-request checks.
 
-    Returns "stale", "current", or "unknown" when the comparison is unavailable.
+    Returns "stale", "current", or "unknown" when either comparison is unavailable.
+    A `base_files` of None means the comparison never answered, which is not the same
+    as a comparison that answered with no files, so the label is left alone instead of
+    being cleared.
     """
     if _merge_state(payload) == "BEHIND":
         return "stale"
@@ -93,8 +109,10 @@ def drift_state(
         return "unknown"
     if behind_by <= 0:
         return "current"
+    if base_files is None:
+        return "unknown"
 
-    moved = {str(path) for path in base_files or []}
+    moved = {str(path) for path in base_files}
     touched = {
         str(entry.get("path")) for entry in payload.get("files") or [] if isinstance(entry, dict)
     }
@@ -121,8 +139,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-files",
-        default="[]",
-        help="JSON array of files the base branch changed since the merge base",
+        default="",
+        help=(
+            "JSON array of files the base branch changed since the merge base, "
+            "empty when the comparison was unavailable"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -131,8 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     payload = json.loads(args.state_json)
     if args.field == "drift":
-        base_files = json.loads(args.base_files or "[]")
-        print(drift_state(payload, parse_behind_by(args.behind_by), base_files))
+        behind_by = parse_behind_by(args.behind_by)
+        base_files = parse_base_files(args.base_files)
+        print(drift_state(payload, behind_by, base_files))
     else:
         print(check_state(payload))
     return 0
