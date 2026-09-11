@@ -2623,10 +2623,21 @@ def _remove_headroom_installed_tokensave_mcp(registrar: Any) -> str:
     """Remove the tokensave MCP entry only if the ledger proves Headroom installed it."""
     from headroom.mcp_registry.ledger import clear_install, headroom_installed_matching
 
-    current = registrar.get_server("tokensave")
+    # Headroom only ever installed tokensave machine-wide: it was retired before
+    # #2787 introduced project scope, so its ledger key is the pre-scope (user
+    # scope) one. Pin the ownership check and the delete to that scope — an
+    # unscoped delete now also takes the project entry, which no ledger record
+    # authorizes, and an unscoped read lets a project entry shadow ours.
+    at_user_scope: dict[str, Any] = {}
+    if hasattr(registrar, "ownership_key"):  # Claude; the others have no scopes
+        from headroom.mcp_registry.claude import SCOPE_USER
+
+        at_user_scope = {"scope": SCOPE_USER}
+
+    current = registrar.get_server("tokensave", **at_user_scope)
     if not headroom_installed_matching(registrar.name, current):
         return "not_headroom_owned"
-    if registrar.unregister_server("tokensave"):
+    if registrar.unregister_server("tokensave", **at_user_scope):
         clear_install(registrar.name, "tokensave")
         return "removed"
     return "failed"
