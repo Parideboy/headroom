@@ -38,7 +38,7 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -360,9 +360,12 @@ class CompressionStore:
         self._tombstones: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._max_tombstones = 512
 
-        # Feedback tracking
-        self._retrieval_events: list[RetrievalEvent] = []
+        # Feedback tracking. maxlen caps the display history, replacing an
+        # append-then-reslice that re-copied 1000 pointers on every retrieval.
         self._max_events = 1000  # Keep last 1000 events
+        self._retrieval_events: deque[RetrievalEvent] = deque(maxlen=self._max_events)
+        # Deliberately NOT bounded: this is a drain-by-swap queue, and every
+        # event in it still owes a feedback notification.
         self._pending_feedback_events: list[RetrievalEvent] = []
 
         # MEDIUM FIX #16: Use a min-heap for O(log n) eviction instead of O(n)
@@ -947,6 +950,11 @@ class CompressionStore:
 
         CRITICAL FIX: Track stale heap entries when deleting to prevent memory leak.
         """
+        purge_expired = getattr(self._backend, "purge_expired", None)
+        if callable(purge_expired):
+            self._stale_heap_entries += purge_expired()
+            return
+
         expired = [
             (key, entry, reason)
             for key, entry in self._backend.items()
@@ -1040,11 +1048,8 @@ class CompressionStore:
             tool_signature_hash=tool_signature_hash,
         )
 
+        # maxlen keeps this bounded; no trim needed here.
         self._retrieval_events.append(event)
-
-        # Keep only recent events
-        if len(self._retrieval_events) > self._max_events:
-            self._retrieval_events = self._retrieval_events[-self._max_events :]
 
         # Queue event for feedback processing (will be processed after lock release)
         # This is safe because process_pending_feedback() uses the lock to atomically
