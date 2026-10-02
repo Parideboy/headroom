@@ -1946,9 +1946,8 @@ class HeadroomProxy(
         gateway stalled 21 s while transformers, torch and the ONNX session
         came up. Loading on a background thread after a short delay moves that
         cost off the request path. Skipped on glibc older than 2.28 (the
-        affected host family) and when ``HEADROOM_KOMPRESS_WARMUP`` is ``0``
-        (or ``HEADROOM_KOMPRESS_BACKGROUND_WARM=0``); ``1`` forces it.
-        Returns ``True`` when a warm-up thread was started.
+        affected host family) and when ``HEADROOM_KOMPRESS_WARMUP`` is ``0``;
+        ``1`` forces it. Returns ``True`` when a warm-up thread was started.
 
         The thread also promotes ``warmup.kompress``. The eager preload
         deliberately skips ``preload()`` so a native load can never block the
@@ -1958,8 +1957,6 @@ class HeadroomProxy(
         ``kompress: unhealthy, backend: null`` forever (GH #2730).
         """
         raw = os.environ.get("HEADROOM_KOMPRESS_WARMUP", "").strip().lower()
-        if os.environ.get("HEADROOM_KOMPRESS_BACKGROUND_WARM", "1").strip() == "0":
-            raw = "0"
         if raw in ("0", "false", "no", "off"):
             return False
         if not raw and os.environ.get("PYTEST_CURRENT_TEST"):
@@ -2013,8 +2010,9 @@ class HeadroomProxy(
             try:
                 backend = compressor.preload(allow_download=True)
             except not_cached:
-                # A cold cache with downloads unavailable leaves the component
-                # deferred, exactly as it behaved before this thread existed.
+                # The local loader only raises this when downloads are off, so
+                # with allow_download=True a cold cache downloads instead. This
+                # covers compressors that report a cache miss on their own.
                 slot.info["detail"] = KOMPRESS_DETAIL_NOT_CACHED
                 logger.debug("Kompress background warm-up: model not cached")
                 return
@@ -2028,7 +2026,7 @@ class HeadroomProxy(
             if not backend:
                 return
             slot.info.pop("detail", None)
-            slot.mark_loaded(handle=compressor, backend=backend)
+            slot.mark_loaded(handle=compressor, backend=backend, source_status="background")
             logger.info(
                 "Kompress: warmed in the background in %.0f ms (backend %s)",
                 (time.monotonic() - started) * 1000,

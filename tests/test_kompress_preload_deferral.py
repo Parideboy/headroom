@@ -262,7 +262,7 @@ async def test_proxy_startup_does_not_enter_cached_kompress_native_loader(monkey
     )
     # The background warm thread (GH #2730) is allowed to preload; this test
     # covers the *awaited* startup path only, so disable it for determinism.
-    monkeypatch.setenv("HEADROOM_KOMPRESS_BACKGROUND_WARM", "0")
+    monkeypatch.setenv("HEADROOM_KOMPRESS_WARMUP", "0")
     router = _router_kompress_only()
     stub = _FatalPreloadCompressor(cached=True)
     monkeypatch.setattr(router, "_get_kompress", lambda: stub)
@@ -325,13 +325,18 @@ async def test_startup_background_warm_promotes_deferred_kompress(monkeypatch):
         assert stub.preload_calls == [True]
         assert proxy.warmup.kompress.status == "loaded"
         assert proxy.warmup.kompress.info["backend"] == "onnx"
+        assert proxy.warmup.kompress.info["source_status"] == "background"
     finally:
         await proxy.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_startup_background_warm_leaves_cold_cache_deferred(monkeypatch):
-    """An uncached model stays deferred and says why."""
+async def test_startup_background_warm_reports_compressor_cache_miss(monkeypatch):
+    """A compressor that reports a cache miss stays deferred and says why.
+
+    The local loader downloads on a cold cache under ``allow_download=True``;
+    this covers compressors that raise ``KompressModelNotCached`` regardless.
+    """
     pytest.importorskip("httpx")
     _enable_startup_warm(monkeypatch)
 
