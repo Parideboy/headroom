@@ -3085,13 +3085,11 @@ def _strip_codex_headroom_blocks(
         content = _remove_marker_span(content, _MEMORY_MCP_MARKER, _MEMORY_MCP_END)
 
     # Strip any leftover top-level keys that older (or crashed) versions of
-    # `wrap codex` may have written outside the marker block.
-    content = re.sub(r'(?m)^[ \t]*model_provider[ \t]*=[ \t]*"headroom"[ \t]*\r?\n', "", content)
-    content = re.sub(
-        r'(?m)^[ \t]*openai_base_url[ \t]*=[ \t]*"http://127\.0\.0\.1:\d+/v1"[ \t]*\r?\n',
-        "",
-        content,
-    )
+    # `wrap codex` may have written outside the marker block. Root only:
+    # [profiles.*] overrides are the user's.
+    from headroom.cli.init import _strip_codex_root_routing_orphans
+
+    content = _strip_codex_root_routing_orphans(content)
 
     # Remove an orphaned local-proxy provider structurally. Text-level table
     # matching cannot safely distinguish comments, multiline strings, and
@@ -3623,18 +3621,28 @@ def _restore_codex_provider_config() -> tuple[str, Path]:
       content (created by wrap or init) and has been deleted.
     * ``"noop"``     — nothing to undo; no Headroom marker and no backup.
     """
+    from headroom.cli.init import _CODEX_PROVIDER_MARKER_START, _strip_codex_init_block
+
     config_file, backup_file = _codex_config_paths()
 
     # Case 1: pre-wrap snapshot exists — restore it exactly.
     if backup_file.exists():
         shutil.copy2(backup_file, config_file)
         backup_file.unlink()
+        # A snapshot taken after `headroom init codex` still carries init's
+        # routing block; restoring it verbatim would leave Codex pinned to the
+        # proxy while unwrap reports success (#3749).
+        restored = _read_text(config_file)
+        if _CODEX_PROVIDER_MARKER_START in restored:
+            cleaned = _strip_codex_init_block(restored)
+            if not cleaned.strip():
+                config_file.unlink()
+                return "removed", config_file
+            _write_text(config_file, cleaned)
         return "restored", config_file
 
     # Case 2: no backup, but config file exists and has markers — strip them.
     if config_file.exists():
-        from headroom.cli.init import _CODEX_PROVIDER_MARKER_START, _strip_codex_init_block
-
         original = _read_text(config_file)
         has_init_block = _CODEX_PROVIDER_MARKER_START in original
         if has_init_block or _codex_config_has_headroom_markers(original):
