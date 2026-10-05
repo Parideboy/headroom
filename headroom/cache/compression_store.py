@@ -835,6 +835,7 @@ class CompressionStore:
 
         reason = tombstone["reason"]
         status["removed_at"] = tombstone["at"]
+        status["age_seconds"] = tombstone["at"] - tombstone["created_at"]
         status["ttl_seconds"] = tombstone["ttl_seconds"]
         status["max_lifetime_seconds"] = tombstone["max_lifetime_seconds"]
         status["retrieval_count"] = tombstone["retrieval_count"]

@@ -513,19 +513,14 @@ class HeadroomMCPServer:
                 "compressed_item_count": entry.compressed_item_count,
                 "retrieval_count": entry.retrieval_count,
             }
-        if entry_status.get("status") == "expired":
+        if entry_status.get("status") == "available":
+            # retrieve() missed although the entry was live a moment ago: it
+            # expired in between (retrieve() records why) or another worker
+            # removed it. Re-read rather than infer expiry from creation age,
+            # which an idle-window TTL no longer implies (#2604).
+            entry_status = store.get_entry_status(hash_key, clean_expired=False)
+        if entry_status.get("status") in ("expired", "expired_and_purged"):
             expired_entry_status = entry_status
-        elif entry_status.get("status") == "available":
-            created_at = entry_status.get("created_at")
-            ttl_seconds = entry_status.get("ttl_seconds")
-            if isinstance(created_at, (int, float)) and isinstance(ttl_seconds, (int, float)):
-                age_seconds = time.time() - created_at
-                if age_seconds > ttl_seconds:
-                    expired_entry_status = {
-                        **entry_status,
-                        "status": "expired",
-                        "age_seconds": age_seconds,
-                    }
 
         # Fall back to proxy if available
         if self.check_proxy and HTTPX_AVAILABLE:
@@ -552,6 +547,20 @@ class HeadroomMCPServer:
                 "status": "expired",
                 "ttl_seconds": ttl_seconds,
                 "age_seconds": expired_entry_status.get("age_seconds"),
+                "hint": (
+                    "Use the source of truth to regenerate fresh content. "
+                    "Re-run the command or re-read the file."
+                ),
+            }
+
+        if entry_status.get("status") == "evicted":
+            return {
+                "error": (
+                    f"{format_retrieval_miss_detail(entry_status)}. "
+                    "Do not retry the same hash. Re-run the source command or re-read the source file."
+                ),
+                "hash": hash_key,
+                "status": "evicted",
                 "hint": (
                     "Use the source of truth to regenerate fresh content. "
                     "Re-run the command or re-read the file."
