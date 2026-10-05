@@ -3989,7 +3989,12 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     _proxy_token_bytes = _proxy_token.encode("utf-8") if _proxy_token else b""
     # Health/readiness probes must stay reachable without a token so
     # orchestrators can check a container that binds non-loopback.
-    _AUTH_EXEMPT_PATHS = frozenset({"/health", "/healthz", "/livez", "/readyz"})
+    #
+    # The exemption covers only GET, and only paths with a GET handler below.
+    # Anything else on these paths falls through to the catch-all passthrough
+    # relay (FastAPI's @app.get does not register HEAD), so exempting it would
+    # let an unauthenticated caller relay arbitrary requests upstream.
+    _AUTH_EXEMPT_PATHS = frozenset({"/health", "/livez", "/readyz"})
 
     # A non-loopback bind with no token is the exact shape (``--host 0.0.0.0``
     # from any launcher) that exposes the unauthenticated /v1/* relay to the
@@ -4050,7 +4055,8 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             path = request.url.path
             client = getattr(request, "client", None)
             client_host = getattr(client, "host", None) if client is not None else None
-            if path not in _AUTH_EXEMPT_PATHS and not is_loopback_host(client_host):
+            exempt = request.method == "GET" and path in _AUTH_EXEMPT_PATHS
+            if not exempt and not is_loopback_host(client_host):
                 provided = _extract_proxy_token(request.headers)
                 if provided is None or not hmac.compare_digest(
                     provided.encode("utf-8", "replace"), _proxy_token_bytes
@@ -5928,7 +5934,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         )
 
     # CCR Tool Call Handler - for agent frameworks to call when LLM uses headroom_retrieve
-    @app.post("/v1/retrieve/tool_call", dependencies=[Depends(_require_loopback)])
+    @app.post(
+        "/v1/retrieve/tool_call",
+        dependencies=[Depends(_require_loopback), Depends(_require_same_origin)],
+    )
     async def ccr_handle_tool_call(request: Request):
         """Handle a CCR tool call from an LLM response.
 
