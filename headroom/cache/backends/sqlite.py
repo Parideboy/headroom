@@ -56,12 +56,15 @@ _MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS idx_ccr_expires_at ON ccr_entries (expires_at)",
 )
 
-# Rows written before the expires_at migration have NULL there. Fall back to
-# the legacy created_at + ttl predicate for those instead of purging them
-# blindly (NULL comparisons are never true, so they would otherwise leak).
+# _open() backfills expires_at for rows written before the migration, but an
+# older build sharing the file can still insert rows without it. Those fall
+# back to the legacy created_at + ttl predicate (NULL comparisons are never
+# true, so they would otherwise leak). Written as an OR rather than a CASE so
+# SQLite answers both branches from idx_ccr_expires_at instead of scanning
+# the whole table on every purge.
 _PURGE_SQL = (
-    "DELETE FROM ccr_entries WHERE "
-    "CASE WHEN expires_at IS NULL THEN created_at + ttl ELSE expires_at END < ?"
+    "DELETE FROM ccr_entries WHERE expires_at < ?1 "
+    "OR (expires_at IS NULL AND created_at + ttl < ?1)"
 )
 
 # Purge expired rows at most this often (seconds). Purging is hygiene,
@@ -184,6 +187,19 @@ class SQLiteBackend:
                 # "duplicate column name" on an already-migrated database.
                 if "duplicate column" not in str(e).lower():
                     raise
+        # Legacy rows carry last_accessed in their JSON but no expires_at.
+        # Derive it before the sweep below, or a recently-retrieved original
+        # would be purged on the old created_at + ttl wall clock.
+        legacy = conn.execute(
+            "SELECT hash, entry_json FROM ccr_entries WHERE expires_at IS NULL"
+        ).fetchall()
+        for hash_key, raw in legacy:
+            entry = self._entry_from_json(raw)
+            if entry is not None:
+                conn.execute(
+                    "UPDATE ccr_entries SET expires_at = ? WHERE hash = ?",
+                    (entry.expires_at, hash_key),
+                )
         # Startup hygiene: expired rows are only purged opportunistically
         # on writes, so a quiet store could otherwise hold expired
         # originals (which may contain sensitive tool output) on disk

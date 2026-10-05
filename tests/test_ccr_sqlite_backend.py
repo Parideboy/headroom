@@ -7,9 +7,11 @@ worker processes — neither holds for the in-memory dict.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
+from dataclasses import asdict
 
 import pytest
 
@@ -186,6 +188,37 @@ class TestSQLiteBackend:
         entry = b.get("h1")
         assert entry is not None
         assert entry.original_content == make_entry("h1").original_content
+
+    def test_pre_migration_rows_get_an_access_aware_deadline(self, db_path):
+        # A file from before the expires_at column: the purge must honor the
+        # stored last_accessed, not the legacy created_at + ttl wall clock.
+        now = time.time()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE ccr_entries (hash TEXT PRIMARY KEY, entry_json TEXT NOT NULL, "
+            "created_at REAL NOT NULL, ttl INTEGER NOT NULL)"
+        )
+        for hash_key, last_accessed in (("warm", now - 10), ("cold", now - 100)):
+            entry = make_entry(hash_key, ttl=60)
+            entry.created_at = now - 100
+            entry.last_accessed = last_accessed
+            data = asdict(entry)
+            del data["max_lifetime"]  # absent from pre-#2604 rows
+            conn.execute(
+                "INSERT INTO ccr_entries VALUES (?, ?, ?, ?)",
+                (hash_key, json.dumps(data), entry.created_at, entry.ttl),
+            )
+        conn.commit()
+        conn.close()
+
+        b = SQLiteBackend(db_path)
+
+        assert b.get("warm") is not None
+        assert b.get("cold") is None
+        (expires_at,) = b._conn.execute(
+            "SELECT expires_at FROM ccr_entries WHERE hash = 'warm'"
+        ).fetchone()
+        assert expires_at == pytest.approx(now + 50)
 
     def test_purge_expired_deletes_by_deadline_and_keeps_the_boundary_row(self, db_path):
         b = SQLiteBackend(db_path)
