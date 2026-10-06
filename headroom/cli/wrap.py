@@ -3627,18 +3627,21 @@ def _restore_codex_provider_config() -> tuple[str, Path]:
 
     # Case 1: pre-wrap snapshot exists — restore it exactly.
     if backup_file.exists():
-        shutil.copy2(backup_file, config_file)
-        backup_file.unlink()
         # A snapshot taken after `headroom init codex` still carries init's
         # routing block; restoring it verbatim would leave Codex pinned to the
-        # proxy while unwrap reports success (#3749).
-        restored = _read_text(config_file)
-        if _CODEX_PROVIDER_MARKER_START in restored:
-            cleaned = _strip_codex_init_block(restored)
+        # proxy while unwrap reports success (#3749). The snapshot is deleted
+        # only once the config is written, so a failed write can be retried.
+        snapshot = _read_text(backup_file)
+        if _CODEX_PROVIDER_MARKER_START in snapshot:
+            cleaned = _strip_codex_init_block(snapshot)
             if not cleaned.strip():
-                config_file.unlink()
+                config_file.unlink(missing_ok=True)
+                backup_file.unlink()
                 return "removed", config_file
             _write_text(config_file, cleaned)
+        else:
+            shutil.copy2(backup_file, config_file)
+        backup_file.unlink()
         return "restored", config_file
 
     # Case 2: no backup, but config file exists and has markers — strip them.

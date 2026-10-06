@@ -2213,6 +2213,42 @@ def test_unwrap_codex_after_init_then_wrap_removes_init_routing(
     assert tomllib.loads(restored) == tomllib.loads(original)
 
 
+def test_unwrap_codex_keeps_snapshot_when_init_cleanup_write_fails(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed write of the init-cleaned snapshot must not consume the
+    snapshot, or a retry has nothing left to restore."""
+    from headroom.cli import init as init_cli
+
+    _set_test_home(monkeypatch, tmp_path)
+    config_file = tmp_path / ".codex" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    original = 'model = "gpt-5"\n\n[mcp_servers.local_thing]\ncommand = "thing"\n'
+    config_file.write_text(original, encoding="utf-8")
+    init_cli._ensure_codex_provider(config_file, 8787)
+    runner.invoke(main, ["wrap", "codex", "--prepare-only", "--port", "8787"])
+    backup_file = wrap_mod._codex_config_paths()[1]
+    assert backup_file.exists()
+
+    def failing_write(path: Path, content: str) -> None:
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(wrap_mod, "_write_text", failing_write)
+        failed = runner.invoke(main, ["unwrap", "codex", "--no-stop-proxy"])
+
+    assert failed.exit_code != 0
+    assert backup_file.exists()
+
+    result = runner.invoke(main, ["unwrap", "codex", "--no-stop-proxy"])
+
+    assert result.exit_code == 0, result.output
+    assert "Restored prior" in result.output
+    restored = config_file.read_text(encoding="utf-8")
+    assert "127.0.0.1:8787" not in restored
+    assert tomllib.loads(restored) == tomllib.loads(original)
+
+
 def test_unwrap_codex_init_cleanup_keeps_profile_overrides(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
