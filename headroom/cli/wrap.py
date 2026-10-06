@@ -8242,7 +8242,11 @@ def openclaw(
     "--extra-model",
     "extra_model_specs",
     multiple=True,
-    help="Extra model for the headroom provider, format id[:name[:context_window]] (repeatable)",
+    help=(
+        "Extra model for the headroom provider, format "
+        "id[=name[=context_window[=output_limit]]] (repeatable; "
+        "env: HEADROOM_OPENCODE_EXTRA_MODELS, comma-separated)"
+    ),
 )
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.option("--prepare-only", is_flag=True, hidden=True)
@@ -8281,7 +8285,7 @@ def opencode(
         headroom wrap opencode --port 9999             # Custom proxy port
         headroom wrap opencode --backend anyllm --anyllm-provider groq
         headroom wrap opencode --copilot-subscription # Use a GitHub Copilot subscription
-        headroom wrap opencode --extra-model deepseek-chat:"DeepSeek Chat":65536
+        headroom wrap opencode --extra-model "qwen2.5-coder:7b=Qwen Coder=32768"
         headroom wrap opencode --openai-api-url https://api.deepseek.com/v1
 
     \b

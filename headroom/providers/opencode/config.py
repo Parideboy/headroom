@@ -55,41 +55,53 @@ HEADROOM_OPENCODE_MODELS: dict[str, Any] = {
 
 
 # Env var holding comma-separated extra model specs (same format as the
-# `--extra-model` flag) so custom models survive re-wraps.
+# `--extra-model` flag) so custom models survive re-wraps. Names in it cannot
+# contain a comma.
 HEADROOM_OPENCODE_EXTRA_MODELS_ENV = "HEADROOM_OPENCODE_EXTRA_MODELS"
 
-# Defaults for extra models when the spec omits limits.
+# Defaults for extra models when the spec omits limits. The output default is
+# also capped at the context window.
 _EXTRA_MODEL_DEFAULT_CONTEXT = 200000
 _EXTRA_MODEL_DEFAULT_OUTPUT = 16384
 
 
-def parse_extra_model_spec(spec: str) -> tuple[str, dict[str, Any]]:
-    """Parse an ``id[:name[:context_window]]`` extra-model spec.
+def _extra_model_limit(raw: str, label: str, spec: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"extra model spec has a non-integer {label}: {spec!r}") from None
+    if value <= 0:
+        raise ValueError(f"extra model spec has a non-positive {label}: {spec!r}")
+    return value
 
+
+def parse_extra_model_spec(spec: str) -> tuple[str, dict[str, Any]]:
+    """Parse an ``id[=name[=context_window[=output_limit]]]`` extra-model spec.
+
+    Fields are split on ``=`` because model ids routinely contain ``:``
+    (Ollama ``qwen2.5-coder:7b``, OpenRouter ``vendor/model:free``).
     Returns a ``(model_id, entry)`` pair shaped like the values in
-    ``HEADROOM_OPENCODE_MODELS``. ``name`` defaults to the id and
-    ``context_window`` defaults to 200000. Raises ``ValueError`` on an
-    empty id or a non-integer context window.
+    ``HEADROOM_OPENCODE_MODELS``. ``name`` defaults to the id,
+    ``context_window`` to 200000 and ``output_limit`` to
+    ``min(16384, context_window)``. Raises ``ValueError`` on an empty id or a
+    non-integer or non-positive limit.
     """
-    parts = spec.split(":", 2)
-    model_id = parts[0].strip()
+    parts = [part.strip() for part in spec.split("=", 3)]
+    model_id = parts[0]
     if not model_id:
         raise ValueError(f"extra model spec has an empty model id: {spec!r}")
-    name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else model_id
-    context = _EXTRA_MODEL_DEFAULT_CONTEXT
-    if len(parts) > 2 and parts[2].strip():
-        try:
-            context = int(parts[2].strip())
-        except ValueError:
-            raise ValueError(
-                f"extra model spec has a non-integer context window: {spec!r}"
-            ) from None
-        if context <= 0:
-            raise ValueError(f"extra model spec has a non-positive context window: {spec!r}")
-    return model_id, {
-        "name": name,
-        "limit": {"context": context, "output": _EXTRA_MODEL_DEFAULT_OUTPUT},
-    }
+    name = parts[1] if len(parts) > 1 and parts[1] else model_id
+    context = (
+        _extra_model_limit(parts[2], "context window", spec)
+        if len(parts) > 2 and parts[2]
+        else _EXTRA_MODEL_DEFAULT_CONTEXT
+    )
+    output = (
+        _extra_model_limit(parts[3], "output limit", spec)
+        if len(parts) > 3 and parts[3]
+        else min(_EXTRA_MODEL_DEFAULT_OUTPUT, context)
+    )
+    return model_id, {"name": name, "limit": {"context": context, "output": output}}
 
 
 def extra_models_from_env() -> dict[str, Any]:

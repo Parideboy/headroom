@@ -535,9 +535,9 @@ def test_wrap_opencode_extra_model_flag_injects_config(
                 "opencode",
                 "--prepare-only",
                 "--extra-model",
-                "deepseek-chat:DeepSeek Chat:65536",
+                "deepseek-chat=DeepSeek Chat=65536",
                 "--extra-model",
-                "kimi-k2",
+                "qwen2.5-coder:7b",
             ],
         )
 
@@ -547,7 +547,7 @@ def test_wrap_opencode_extra_model_flag_injects_config(
     models = config["provider"]["headroom"]["models"]
     assert models["deepseek-chat"]["name"] == "DeepSeek Chat"
     assert models["deepseek-chat"]["limit"]["context"] == 65536
-    assert models["kimi-k2"]["name"] == "kimi-k2"
+    assert models["qwen2.5-coder:7b"]["name"] == "qwen2.5-coder:7b"
     assert "gpt-4o" in models
 
 
@@ -559,7 +559,7 @@ def test_wrap_opencode_extra_models_env_var(
     """HEADROOM_OPENCODE_EXTRA_MODELS persists extra models across wraps."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    monkeypatch.setenv("HEADROOM_OPENCODE_EXTRA_MODELS", "deepseek-chat:DeepSeek Chat:65536")
+    monkeypatch.setenv("HEADROOM_OPENCODE_EXTRA_MODELS", "deepseek-chat=DeepSeek Chat=65536")
     _set_test_home(monkeypatch, tmp_path)
 
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
@@ -598,7 +598,7 @@ def test_wrap_opencode_extra_model_flag_in_launch_env(
                     "9000",
                     "--no-mcp",
                     "--extra-model",
-                    "deepseek-chat:DeepSeek Chat:65536",
+                    "deepseek-chat=DeepSeek Chat=65536",
                 ],
             )
 
@@ -620,7 +620,7 @@ def test_wrap_opencode_extra_models_env_var_in_launch_env(
     """Env-sourced extra models reach OPENCODE_CONFIG_CONTENT on launch."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
-    monkeypatch.setenv("HEADROOM_OPENCODE_EXTRA_MODELS", "kimi-k2:Kimi K2")
+    monkeypatch.setenv("HEADROOM_OPENCODE_EXTRA_MODELS", "kimi-k2=Kimi K2")
     _set_test_home(monkeypatch, tmp_path)
 
     captured: dict[str, object] = {}
@@ -639,6 +639,56 @@ def test_wrap_opencode_extra_models_env_var_in_launch_env(
     assert config["provider"]["headroom"]["models"]["kimi-k2"]["name"] == "Kimi K2"
 
 
+def test_wrap_opencode_extra_model_overrides_kept_user_entry(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With --openai-api-url the user's headroom models are kept, but an
+    --extra-model for the same id replaces the kept entry."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_EXTRA_MODELS", raising=False)
+    _set_test_home(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "headroom": {
+                        "models": {
+                            "deepseek-chat": {"name": "Stale"},
+                            "deepseek-reasoner": {"name": "DeepSeek Reasoner"},
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
+        result = runner.invoke(
+            main,
+            [
+                "wrap",
+                "opencode",
+                "--prepare-only",
+                "--openai-api-url",
+                "https://api.deepseek.com/v1",
+                "--extra-model",
+                "deepseek-chat=DeepSeek Chat=65536",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    models = json.loads(config_file.read_text(encoding="utf-8"))["provider"]["headroom"]["models"]
+    assert models["deepseek-chat"]["name"] == "DeepSeek Chat"
+    assert models["deepseek-chat"]["limit"]["context"] == 65536
+    assert models["deepseek-reasoner"] == {"name": "DeepSeek Reasoner"}
+
+
 def test_wrap_opencode_extra_model_invalid_spec_errors(
     runner: CliRunner,
     tmp_path: Path,
@@ -652,7 +702,7 @@ def test_wrap_opencode_extra_model_invalid_spec_errors(
     with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
         result = runner.invoke(
             main,
-            ["wrap", "opencode", "--prepare-only", "--extra-model", "bad:name:abc"],
+            ["wrap", "opencode", "--prepare-only", "--extra-model", "bad=name=abc"],
         )
 
     assert result.exit_code != 0
