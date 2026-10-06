@@ -113,6 +113,12 @@ To keep the same models on every wrap, set `HEADROOM_OPENCODE_EXTRA_MODELS` to
 a comma-separated list of specs. Names in the variable can't contain a comma.
 When both are set, `--extra-model` wins for the same id.
 
+With `--openai-api-url`, wrap also keeps the model ids already listed under the
+`headroom` provider in `opencode.json`, and it can't tell yours apart from ones
+an earlier `--extra-model` added. To drop an extra model there, delete its
+entry from `opencode.json`, or run `headroom unwrap opencode` before wrapping
+again.
+
 ## Environment Variables
 
 | Variable | Description |
