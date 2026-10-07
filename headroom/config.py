@@ -229,6 +229,10 @@ DEFAULT_EXCLUDE_TOOLS: frozenset[str] = frozenset(
         "WebSearch",
         "WebFetch",
         "headroom_retrieve",
+        # Caveman's recovery tool: like headroom_retrieve, it returns the stored
+        # original of something Caveman compressed upstream of us. Compressing it
+        # again hands the model a lossy copy of the "complete original" (#4010).
+        "caveman_retrieve",
         # Copilot CLI's file-read tool (its `Read` equivalent): raw file bytes
         # the model byte-patches against.
         "view",
@@ -282,6 +286,9 @@ DEFAULT_VERBATIM_EXCLUDE_TOOLS: frozenset[str] = frozenset(
         "web_search",
         "web_fetch",
         "headroom_retrieve",
+        # A recovery tool's output must reach the model exactly as stored; even
+        # the lossless fold (e.g. JSON minify) changes it (#4010).
+        "caveman_retrieve",
         # `view` (Copilot CLI file read) must stay BYTE-EXACT: the model produces
         # line/byte-precise edits against it, and even "lossless" JSON rewrites
         # or cross-turn dedup folds break old_str matching and force re-reads.
