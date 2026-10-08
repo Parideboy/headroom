@@ -291,6 +291,8 @@ def test_macos_launchd_plist_switches_between_keepalive_and_interval(
     assert service_path == tmp_path / "Library" / "LaunchAgents" / "com.headroom.default.plist"
     assert "<key>KeepAlive</key>" in service_content
     assert "<key>StartInterval</key>" not in service_content
+    assert "<key>ProgramArguments</key>" in service_content
+    assert "run-headroom.sh" in service_content
 
     task_manifest = _manifest(profile="tasky", supervisor=SupervisorKind.TASK.value)
     task_path, task_content = _macos_launchd_plist(
@@ -728,7 +730,7 @@ def test_install_supervisor_darwin_windows_and_unsupported(monkeypatch, tmp_path
     )
     calls: list[list[str]] = []
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         calls.append(command)
         if isinstance(command, list) and len(command) > 1 and command[1] == "/Query":
             return _LaunchctlResult(
@@ -792,6 +794,32 @@ def test_install_supervisor_darwin_windows_and_unsupported(monkeypatch, tmp_path
         install_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
 
 
+def test_install_supervisor_darwin_prepare_does_not_bootstrap(monkeypatch, tmp_path: Path) -> None:
+    run_script = tmp_path / "run-headroom.sh"
+    monkeypatch.setattr(
+        "headroom.install.supervisors.render_runner_scripts",
+        lambda manifest: [type("Record", (), {"kind": "script", "path": str(run_script)})()],
+    )
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "darwin")
+    monkeypatch.setattr("headroom.install.supervisors.os.getuid", lambda: 123, raising=False)
+    monkeypatch.setattr(
+        "headroom.install.supervisors._macos_launchd_plist",
+        lambda manifest, script, interval=None: (tmp_path / "job.plist", "plist"),
+    )
+    bootstraps: list[list[str]] = []
+    monkeypatch.setattr(
+        "headroom.install.supervisors._bootstrap_with_retry",
+        lambda domain, path, **kwargs: bootstraps.append([domain, str(path)]),
+    )
+    monkeypatch.setattr(
+        "headroom.install.supervisors.run", lambda *args, **kwargs: _LaunchctlResult(0)
+    )
+
+    install_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value), start=False)
+
+    assert bootstraps == []
+
+
 def test_install_supervisor_retries_bootstrap_until_launchd_settles(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -815,7 +843,7 @@ def test_install_supervisor_retries_bootstrap_until_launchd_settles(
     monkeypatch.setattr("headroom.install.supervisors.time.sleep", lambda _s: None)
     bootstrap_attempts = 0
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         nonlocal bootstrap_attempts
         if command[1] == "bootout":
             return _LaunchctlResult(0)
@@ -850,7 +878,7 @@ def test_install_supervisor_raises_after_bootstrap_keeps_failing(
     monkeypatch.setattr("headroom.install.supervisors.time.sleep", lambda _s: None)
     monkeypatch.setattr("headroom.install.supervisors._MACOS_BOOTSTRAP_RETRIES", 3)
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         if command[1] == "bootout":
             return _LaunchctlResult(0)
         return _LaunchctlResult(5, stderr="Bootstrap failed: 5: Input/output error")
@@ -866,6 +894,16 @@ class _LaunchctlResult:
         self.returncode = returncode
         self.stderr = stderr
         self.stdout = stdout
+
+
+def test_linux_persistent_task_stop_does_not_call_systemctl(monkeypatch) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "linux")
+    monkeypatch.setattr(
+        "headroom.install.supervisors.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("cron task stop must not call systemctl"),
+    )
+
+    stop_supervisor(_manifest(supervisor=SupervisorKind.TASK.value))
 
 
 def test_start_and_stop_supervisor_darwin_windows_and_none(monkeypatch) -> None:
@@ -917,7 +955,7 @@ def test_macos_start_bootstraps_when_job_not_registered(monkeypatch, tmp_path: P
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     calls: list[list[str]] = []
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         calls.append(command)
         if command[1] == "kickstart":
             return _LaunchctlResult(113, stderr="Could not find service")
@@ -943,7 +981,7 @@ def test_macos_start_retries_bootstrap_until_launchd_settles(monkeypatch, tmp_pa
     monkeypatch.setattr("headroom.install.supervisors.time.sleep", lambda _s: None)
     bootstrap_attempts = 0
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         nonlocal bootstrap_attempts
         if command[1] == "kickstart":
             return _LaunchctlResult(113)
@@ -965,7 +1003,7 @@ def test_macos_start_raises_after_bootstrap_keeps_failing(monkeypatch, tmp_path:
     monkeypatch.setattr("headroom.install.supervisors.time.sleep", lambda _s: None)
     monkeypatch.setattr("headroom.install.supervisors._MACOS_BOOTSTRAP_RETRIES", 3)
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         if command[1] == "kickstart":
             return _LaunchctlResult(113)
         return _LaunchctlResult(5, stderr="Bootstrap failed: 5: Input/output error")
@@ -983,7 +1021,7 @@ def test_macos_stop_tolerates_missing_job(monkeypatch) -> None:
     monkeypatch.setattr("headroom.install.supervisors.os.getuid", lambda: 77, raising=False)
     calls: list[list[str]] = []
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: list[str], **kwargs: object) -> object:
         calls.append(command)
         assert kwargs.get("check") is not True
         return _LaunchctlResult(3, stderr="Boot-out failed: 3: No such process")
@@ -1045,7 +1083,11 @@ def test_remove_supervisor_linux_service_cron_path_and_missing_crontab(
 
     def fake_run(command: list[str], **kwargs):
         calls.append(command)
-        return type("Result", (), {"returncode": 1, "stdout": ""})()
+        if command == ["crontab", "-l"]:
+            return type(
+                "Result", (), {"returncode": 1, "stdout": "", "stderr": "no crontab for user"}
+            )()
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr("headroom.install.supervisors.subprocess.run", fake_run)
     unit_path = tmp_path / "headroom-default.service"
@@ -1076,11 +1118,35 @@ def test_remove_supervisor_linux_service_cron_path_and_missing_crontab(
     assert calls[-1] == ["crontab", "-l"]
 
 
+def test_remove_supervisor_surfaces_linux_command_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "linux")
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "permission denied"
+
+    monkeypatch.setattr("headroom.install.supervisors.run", lambda *args, **kwargs: Result())
+    unit_path = tmp_path / "headroom-default.service"
+    unit_path.write_text("unit", encoding="utf-8")
+    monkeypatch.setattr(
+        "headroom.install.supervisors._linux_service_unit",
+        lambda manifest, script: (unit_path, "unit"),
+    )
+
+    with pytest.raises(click.ClickException, match="systemctl disable --now failed"):
+        remove_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
+    assert unit_path.exists()
+
+
 def test_remove_supervisor_darwin_and_windows(monkeypatch, tmp_path: Path) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(
         "headroom.install.supervisors.subprocess.run",
-        lambda command, **kwargs: calls.append(command),
+        lambda command, **kwargs: (
+            calls.append(command)
+            or type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        ),
     )
     monkeypatch.setattr("headroom.install.supervisors.os.getuid", lambda: 55, raising=False)
 
@@ -1116,3 +1182,72 @@ def test_remove_supervisor_darwin_and_windows(monkeypatch, tmp_path: Path) -> No
         ["schtasks", "/Delete", "/TN", "headroom-default-health", "/F"],
     ]
     assert calls == windows_cleanup + windows_cleanup
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "failure_code"), [("sc.exe", 5), ("schtasks", 1), ("schtasks", 5)]
+)
+def test_windows_task_backed_removal_surfaces_permission_failure(
+    monkeypatch: pytest.MonkeyPatch, failed_command: str, failure_code: int
+) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "win32")
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        failed = command[0] == failed_command
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": failure_code if failed else 0,
+                "stdout": "",
+                "stderr": "Access denied" if failed else "",
+            },
+        )()
+
+    monkeypatch.setattr("headroom.install.supervisors.run", fake_run)
+    with pytest.raises(click.ClickException, match="failed: Access denied"):
+        remove_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
+
+
+def test_windows_task_backed_removal_accepts_absent_legacy_service_and_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "win32")
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        calls.append(command)
+        code = 1060 if command[0] == "sc.exe" else 1
+        text = (
+            "The specified service does not exist"
+            if code == 1060
+            else "ERROR: The system cannot find the file specified."
+        )
+        return type("Result", (), {"returncode": code, "stdout": "", "stderr": text})()
+
+    monkeypatch.setattr("headroom.install.supervisors.run", fake_run)
+    remove_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
+    assert [c[0] for c in calls] == ["sc.exe", "sc.exe", "schtasks", "schtasks"]
+
+
+def test_windows_task_backed_removal_accepts_stopped_legacy_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("headroom.install.supervisors.sys.platform", "win32")
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        calls.append(command)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 1062 if command[:2] == ["sc.exe", "stop"] else 0,
+                "stdout": "",
+                "stderr": "The service has not been started",
+            },
+        )()
+
+    monkeypatch.setattr("headroom.install.supervisors.run", fake_run)
+    remove_supervisor(_manifest(supervisor=SupervisorKind.SERVICE.value))
+    assert len([c for c in calls if c[0] == "schtasks"]) == 2

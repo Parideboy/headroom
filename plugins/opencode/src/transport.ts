@@ -7,11 +7,11 @@ const http2 = nodeRequire("node:http2") as typeof import("node:http2");
 const childProcess = nodeRequire("node:child_process") as typeof import("node:child_process");
 const fs = nodeRequire("node:fs") as typeof import("node:fs");
 
-const BASE_URL_HEADER = "x-headroom-base-url";
-const ORIGINAL_PATH_HEADER = "x-headroom-original-path";
-const PROJECT_HEADER = "x-headroom-project";
+export const BASE_URL_HEADER = "x-headroom-base-url";
+export const ORIGINAL_PATH_HEADER = "x-headroom-original-path";
+export const PROJECT_HEADER = "x-headroom-project";
 const PROXY_ENV = "HEADROOM_OPENCODE_TRANSPORT_PROXY_URL";
-const EXCLUDE_HOSTS_ENV = "HEADROOM_OPENCODE_EXCLUDE_HOSTS";
+export const EXCLUDE_HOSTS_ENV = "HEADROOM_OPENCODE_EXCLUDE_HOSTS";
 const STATE_KEY = Symbol.for("headroom.opencode.transport");
 
 type FetchArgs = Parameters<typeof fetch>;
@@ -69,7 +69,7 @@ function setState(state: TransportState | undefined): void {
 }
 
 // ponytail: the shim only exists next to the checkout build
-// (plugins/opencode/dist/). The wheel ships entry.opencode.js alone, so
+// (plugins/opencode/dist/). The wheel shipped the entry bundle alone, so
 // `--import=<missing file>` killed every Node child at startup — including
 // OpenCode's stdio MCP servers (issue #2798). No shim on disk, no injection:
 // children go direct instead of dying. Upgrade path is bundling the shim into
@@ -135,6 +135,9 @@ function injectOptionsEnv(args: unknown[], optionIndex: number, state: Transport
   const callback = typeof nextArgs.at(-1) === "function" ? nextArgs.pop() : undefined;
   const existing = isOptions(nextArgs[optionIndex]) ? { ...(nextArgs[optionIndex] as Record<string, unknown>) } : {};
   existing.env = withShimEnv(existing.env as NodeJS.ProcessEnv | undefined, state.proxyUrl, state.excludeHosts);
+  if (process.platform === "win32" && existing.windowsHide === undefined) {
+    existing.windowsHide = true;
+  }
 
   if (isOptions(nextArgs[optionIndex])) {
     nextArgs[optionIndex] = existing;
@@ -205,7 +208,7 @@ function isLoopback(hostname: string): boolean {
 // string is the comma-separated env form; plugin options arrive from untyped
 // JSON, so a lone string there is treated the same way instead of iterated
 // character by character.
-function normalizeExcludeHosts(entries: string | Iterable<unknown>): string[] {
+export function normalizeExcludeHosts(entries: string | Iterable<unknown>): string[] {
   const hosts = new Set<string>();
   for (const entry of typeof entries === "string" ? entries.split(",") : entries) {
     const host = String(entry).trim().toLowerCase().replace(/^(\*\.|\.)/, "");
@@ -221,7 +224,26 @@ function isExcludedHost(hostname: string, excludeHosts: string[]): boolean {
   return excludeHosts.some((host) => normalized === host || normalized.endsWith(`.${host}`));
 }
 
-function shouldRoute(url: URL, proxy: URL, excludeHosts: string[]): boolean {
+// Only recognized LLM API endpoints route through Headroom; any other path
+// (WebFetch, registries, GitHub, unknown services) must reach its original URL
+// untouched. A bare suffix match keeps provider-prefixed variants working
+// (/api/coding/paas/v4/chat/completions, /base/v1/messages, ...).
+//
+// Native Gemini model-generation endpoints use colon-action suffixes
+// (:generateContent, :streamGenerateContent). These are matched by exact
+// suffix so that lookalike paths containing the marker but not ending with it
+// (e.g. /v1/models/gemini:generateContent/status) remain unrouted.
+function isLlmEndpointPath(pathname: string): boolean {
+  return (
+    pathname.endsWith("/chat/completions") ||
+    pathname.endsWith("/responses") ||
+    pathname.endsWith("/messages") ||
+    pathname.endsWith(":generateContent") ||
+    pathname.endsWith(":streamGenerateContent")
+  );
+}
+
+function isRoutableUpstream(url: URL, proxy: URL, excludeHosts: string[]): boolean {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return false;
   }
@@ -235,6 +257,27 @@ function shouldRoute(url: URL, proxy: URL, excludeHosts: string[]): boolean {
     return false;
   }
   return true;
+}
+
+function shouldRoute(url: URL, proxy: URL, excludeHosts: string[]): boolean {
+  return isRoutableUpstream(url, proxy, excludeHosts) && isLlmEndpointPath(url.pathname);
+}
+
+// OpenCode 2.x hands the plugin model base URLs (e.g.
+// https://opencode.ai/zen/go/v1), not inference endpoints: setup appends the
+// wire path when it rewrites the model, so the endpoint-suffix check cannot
+// apply. Eligibility is the shared host/protocol contract only — http(s),
+// not loopback, not the proxy itself, not an excluded host.
+export function modelBaseRoutesThroughProxy(
+  baseUrl: string,
+  proxyUrl: string,
+  excludeHosts: string[] = [],
+): boolean {
+  try {
+    return isRoutableUpstream(new URL(baseUrl), normalizeProxyUrl(proxyUrl), excludeHosts);
+  } catch {
+    return false;
+  }
 }
 
 function routedUrl(upstream: URL, proxy: URL): URL {
@@ -465,20 +508,13 @@ function wrapGet(request: HttpRequest | HttpsRequest): HttpGet | HttpsGet {
   } as HttpGet | HttpsGet;
 }
 
+// http2.connect() has no request path at connect time, so the authority alone
+// cannot prove LLM traffic. Direct HTTP/2 connections always pass through
+// untouched: rejecting external authorities turned WebFetch into a proxy
+// error (#3633).
 function wrapHttp2Connect(originalConnect: Http2Connect): Http2Connect {
-  return function headroomHttp2Connect(this: unknown, authority: string | URL, ...args: unknown[]) {
-    const state = getState();
-    if (state) {
-      const proxy = normalizeProxyUrl(state.proxyUrl);
-      const upstream = authority instanceof URL ? authority : new URL(String(authority));
-      if (shouldRoute(upstream, proxy, state.excludeHosts)) {
-        throw new Error(
-          `Headroom OpenCode wrap blocked direct HTTP/2 connection to ${upstream.origin}. ` +
-            "Use fetch, http, or https so traffic can be routed through Headroom.",
-        );
-      }
-    }
-    return Reflect.apply(originalConnect, this, [authority, ...args]);
+  return function headroomHttp2Connect(this: unknown, ...args: unknown[]) {
+    return Reflect.apply(originalConnect, this, args);
   } as Http2Connect;
 }
 
