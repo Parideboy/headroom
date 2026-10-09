@@ -2836,6 +2836,7 @@ def _disable_serena_mcp(
 # tokensave entry a prior release installed, so upgrading users stop launching it.
 # ======================================================================
 
+
 def _remove_headroom_installed_tokensave_mcp(registrar: Any) -> str:
     """Remove the tokensave MCP entry only if the ledger proves Headroom installed it."""
     from headroom.mcp_registry.ledger import clear_install, headroom_installed_matching
@@ -6429,6 +6430,7 @@ def claude(
 # ======================================================================# Claude Code (unwrap)
 # ======================================================================
 
+
 def _warn_if_proxy_env_leaked(port: int) -> None:
     """Issue #2238: surface a proxy URL that survived unwrap in the live shell.
 
@@ -6559,6 +6561,7 @@ def unwrap_claude(
 
 # ======================================================================# GitHub Copilot CLI
 # ======================================================================
+
 
 def _require_copilot_subscription_resolution() -> CopilotSubscriptionTokenResolution:
     resolution = resolve_subscription_bearer_token_details()
@@ -6908,6 +6911,7 @@ def copilot(
 # ======================================================================# GitHub Copilot CLI (unwrap)
 # ======================================================================
 
+
 @wrap.command("vscode")
 @proxy_port_option()
 @click.option("--memory", is_flag=True, help="Enable persistent cross-session memory")
@@ -6994,6 +6998,7 @@ def unwrap_vscode_copilot(settings_file: Path | None) -> None:
 
 # ======================================================================# Claude Code for VS Code
 # ======================================================================
+
 
 @wrap.command("vscode-claude")
 @proxy_port_option()
@@ -7098,6 +7103,7 @@ def unwrap_vscode_claude(settings_file: Path | None) -> None:
 # ======================================================================# GitHub Copilot CLI (unwrap)
 # ======================================================================
 
+
 @unwrap.command("copilot")
 @click.option(
     "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
@@ -7111,6 +7117,7 @@ def unwrap_copilot(port: int, no_stop_proxy: bool) -> None:
 
 # ======================================================================# OpenAI Codex CLI
 # ======================================================================
+
 
 def _prepare_codex_wrap_state(
     *,
@@ -7420,6 +7427,7 @@ def codex(
 # ======================================================================# Aider
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -7498,6 +7506,7 @@ def aider(
 # ======================================================================# Mistral Vibe
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -7564,6 +7573,7 @@ def vibe(
 
 # ======================================================================# Kimi CLI
 # ======================================================================
+
 
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -7653,6 +7663,7 @@ def kimi(
 
 # ======================================================================# Grok CLI
 # ======================================================================
+
 
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -7782,6 +7793,7 @@ def grok(
 # ======================================================================# Cursor
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -7837,6 +7849,7 @@ def cursor(
 # ======================================================================# Antigravity IDE
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -7890,6 +7903,7 @@ def antigravity(
 
 # ======================================================================# Grok Build
 # ======================================================================
+
 
 @wrap.command("grok-build", context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -7957,6 +7971,7 @@ def grok_build(
 # ======================================================================# Cline (VS Code extension)
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -8017,6 +8032,7 @@ def cline(
 
 # ======================================================================# ZCode (zcode.z.ai desktop app)
 # ======================================================================
+
 
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -8079,6 +8095,7 @@ def zcode(
 
 # ======================================================================# Continue (VS Code / JetBrains extension)
 # ======================================================================
+
 
 @wrap.command("continue", context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -8154,6 +8171,7 @@ def continue_dev(
 # ======================================================================
 # OpenClaw
 # ======================================================================
+
 
 @wrap.command("openclaw")
 @_retired_context_tool_option
@@ -8415,6 +8433,7 @@ def openclaw(
 
 # ======================================================================# OpenCode
 # ======================================================================
+
 
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
@@ -8735,6 +8754,7 @@ def _opencode_home_dir() -> Path:
 # ======================================================================# OpenCode (unwrap)
 # ======================================================================
 
+
 @unwrap.command("opencode")
 @click.option(
     "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
@@ -8893,6 +8913,7 @@ def unwrap_openclaw(
 # ======================================================================# OpenAI Codex CLI (unwrap)
 # ======================================================================
 
+
 @unwrap.command("grok-build")
 @click.option(
     "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
@@ -9020,6 +9041,7 @@ def unwrap_codex(port: int, no_stop_proxy: bool) -> None:
 # ======================================================================# Oh My Pi (omp)
 # ======================================================================
 
+
 @wrap.command(context_settings={"ignore_unknown_options": True})
 @_retired_context_tool_option
 @proxy_port_option()
@@ -9128,6 +9150,7 @@ def unwrap_omp(port: int, no_stop_proxy: bool) -> None:
 # ======================================================================# Grok CLI (unwrap)
 # ======================================================================
 
+
 @unwrap.command("grok")
 @click.option(
     "--port", "-p", default=8787, type=click.IntRange(1, 65535), help="Proxy port (default: 8787)"
@@ -9183,6 +9206,7 @@ def unwrap_grok(port: int, no_stop_proxy: bool) -> None:
 
 # ======================================================================# ZCode (unwrap)
 # ======================================================================
+
 
 @unwrap.command("zcode")
 @click.option(
