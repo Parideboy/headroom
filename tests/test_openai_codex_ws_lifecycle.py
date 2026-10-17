@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -75,7 +76,7 @@ class _MemoryWsHandler:
         self.config = SimpleNamespace(
             inject_context=False,
             inject_tools=True,
-            project_root_override="",
+            project_root_override=str(Path(__file__).resolve().parent),
         )
         self._backend = False
 
@@ -101,6 +102,8 @@ class _MemoryWsHandler:
         args: dict,
         user_id: str,
         provider: str,
+        *,
+        request_context=None,
     ) -> str:
         assert (name, args, user_id, provider) == (
             "memory_search",
@@ -896,6 +899,43 @@ async def test_ws_session_metrics_include_response_completed_usage():
     assert recorded["cache_read_tokens"] == 75
     assert recorded["cache_write_tokens"] == 25
     assert recorded["uncached_input_tokens"] == 25
+    # The write above is the uncached slice, not a billed write: flagged, or
+    # pricing bills those 25 tokens twice.
+    assert recorded["cache_inferred"] is True
+
+
+@pytest.mark.asyncio
+async def test_ws_session_metrics_use_reported_cache_writes():
+    """Responses now reports billed cache writes; they are the truth, not the
+    uncached remainder, and pricing must treat them as real writes."""
+
+    upstream_events = [
+        json.dumps({"type": "response.created", "response": {"id": "r_1"}}),
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "r_1",
+                    "usage": {
+                        "input_tokens": 100,
+                        "input_tokens_details": {"cached_tokens": 75, "cache_write_tokens": 20},
+                        "output_tokens": 12,
+                    },
+                },
+            }
+        ),
+    ]
+    fake_ws_mod = _make_fake_websockets_module(_FakeUpstream(upstream_events))
+    handler = _DummyOpenAIHandler()
+
+    with patch.dict(sys.modules, {"websockets": fake_ws_mod}):
+        await handler.handle_openai_responses_ws(_FakeWebSocket(frames=[_first_frame()]))
+
+    recorded = handler.metrics.recorded_requests[-1]
+    assert recorded["cache_read_tokens"] == 75
+    assert recorded["cache_write_tokens"] == 20
+    assert recorded["uncached_input_tokens"] == 5
+    assert recorded["cache_inferred"] is False
 
 
 @pytest.mark.asyncio
@@ -1790,6 +1830,35 @@ async def test_ws_recognized_client_with_real_path_is_not_restamped():
 
 
 @pytest.mark.asyncio
+async def test_ws_pi_codex_responses_alias_is_stamped():
+    """The Pi-compatible Codex alias gets the same client stamp as /v1/responses."""
+    upstream_events = [
+        json.dumps({"type": "response.created", "response": {"id": "r_1"}}),
+        json.dumps({"type": "response.completed", "response": {"id": "r_1"}}),
+    ]
+    connect_calls: list[tuple[tuple, dict]] = []
+    upstream = _FakeUpstream(upstream_events)
+    fake_ws_mod = _make_fake_websockets_module(upstream, connect_calls=connect_calls)
+    client_ws = _FakeWebSocket(
+        frames=[_first_frame()],
+        headers={
+            "authorization": "Bearer test",
+            "user-agent": "pi/0.11.11 (darwin 25.5.0; arm64)",
+        },
+    )
+    client_ws.url = SimpleNamespace(path="/v1/codex/responses")
+    handler = _DummyOpenAIHandler()
+
+    with patch.dict(sys.modules, {"websockets": fake_ws_mod}):
+        await handler.handle_openai_responses_ws(client_ws)
+
+    assert len(connect_calls) == 1
+    forwarded_headers = connect_calls[0][1]["additional_headers"]
+    assert forwarded_headers["x-client"] == "codex"
+    assert handler.ws_sessions.active_count() == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("store", [True, False])
 @pytest.mark.parametrize(
     "include",
@@ -2001,7 +2070,7 @@ async def test_ws_late_memory_call_after_streamed_message_passes_through():
     handler.memory_handler = _MemoryWsHandler()
     executed: list[tuple[str, dict, str, str]] = []
 
-    async def _execute_memory_tool(name, args, user_id, provider):
+    async def _execute_memory_tool(name, args, user_id, provider, *, request_context=None):
         executed.append((name, args, user_id, provider))
         return '{"memories": []}'
 
@@ -2088,7 +2157,7 @@ async def test_ws_memory_continuation_normalizes_malformed_arguments():
     handler.memory_handler = _MemoryWsHandler()
     executed: list[tuple[str, dict, str, str]] = []
 
-    async def _execute_memory_tool(name, args, user_id, provider):
+    async def _execute_memory_tool(name, args, user_id, provider, *, request_context=None):
         executed.append((name, args, user_id, provider))
         return '{"memories": []}'
 
@@ -2211,7 +2280,7 @@ async def test_ws_memory_continuation_continues_pre_stream_and_passes_late_call(
     handler.memory_handler = _MemoryWsHandler()
     executed: list[tuple[str, dict, str, str]] = []
 
-    async def _execute_memory_tool(name, args, user_id, provider):
+    async def _execute_memory_tool(name, args, user_id, provider, *, request_context=None):
         executed.append((name, args, user_id, provider))
         return '{"memories": []}'
 

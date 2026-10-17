@@ -6,6 +6,8 @@ the cached Kompress native stack on the blocking startup/lifespan path.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from headroom import onnx_runtime
@@ -96,6 +98,7 @@ def test_load_kompress_auto_does_not_pytorch_download_on_cache_miss(monkeypatch)
 
 class _StubCompressor:
     def __init__(self, *, cached: bool):
+        self.config = SimpleNamespace(model_id="org/model")
         self._cached = cached
         self.preload_calls: list[bool] = []
 
