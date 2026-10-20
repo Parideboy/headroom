@@ -207,6 +207,26 @@ def test_apply_provider_scope_lists_default_models(
     assert _headroom_models(config_file) == HEADROOM_OPENCODE_MODELS
 
 
+def test_apply_provider_scope_ignores_the_shell_when_the_manifest_has_no_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest without base_env must not fall back to the process env.
+
+    ``extra_models_from_env`` reads ``os.environ`` when it is handed no
+    mapping, so a manifest whose ``base_env`` is null (hand-edited or corrupt)
+    would otherwise write the shell's specs into the config -- the opposite of
+    the manifest-env guarantee.
+    """
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    monkeypatch.setenv("HEADROOM_OPENCODE_EXTRA_MODELS", "from-shell")
+    manifest = _manifest()
+    manifest.base_env = None  # type: ignore[assignment]
+
+    apply_provider_scope(manifest)
+
+    assert _headroom_models(config_file) == HEADROOM_OPENCODE_MODELS
+
+
 def test_apply_provider_scope_adds_manifest_extra_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

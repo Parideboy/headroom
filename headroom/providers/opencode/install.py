@@ -115,8 +115,11 @@ def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None
 
     # Extra models come from the manifest, not the file: every re-apply first
     # reverts (restoring the pre-install backup) and then replaces the whole
-    # `headroom` entry, so ids hand-added there do not survive.
-    extra_models = extra_models_from_env(manifest.base_env)
+    # `headroom` entry, so ids hand-added there do not survive. A manifest
+    # without base_env (None) must not fall back to the process env: a
+    # scheduled restart does not run in the shell that ran `install apply`,
+    # and the shell's specs are not part of the deployment.
+    extra_models = extra_models_from_env(manifest.base_env or {})
     entry = headroom_provider_entry(manifest.port, extra_models)
 
     # OpenCode sends the provider's apiKey to the proxy, which forwards it to
