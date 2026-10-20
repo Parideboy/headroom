@@ -165,6 +165,15 @@ headroom install apply --preset persistent-service --scope provider --providers 
 The value is stored with the deployment, so restarts keep it. Like any other
 `--env` value, pass it again each time you run `install apply`.
 
+The `apiKey` in `options` is yours, and it is kept: when the deployment names
+an upstream with `OPENAI_TARGET_API_URL` (or `--openai-api-url`), the install
+leaves the key in `options` and rewrites only what Headroom owns (`npm`,
+`name`, `baseURL`, `models`). The key is stored with the deployment, because
+the rewrite drops the whole provider entry and a key you add to the config by
+hand would not survive the next `install apply` or `install restart`. Without
+a named upstream the proxy forwards to OpenAI, so the install leaves no
+third-party key behind.
+
 ## Native OpenCode Plugin
 
 The `headroom-opencode` package's default export is a native OpenCode plugin that works with both OpenCode 1.x and 2.x. It installs Headroom transport interception inside OpenCode, exposes the `headroom_retrieve` tool, and adds Headroom metadata (`HEADROOM_ACTIVE`, `HEADROOM_PROXY_URL`, `HEADROOM_PROJECT`) to the environment of shell commands OpenCode runs.

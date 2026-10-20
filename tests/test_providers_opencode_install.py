@@ -255,6 +255,144 @@ def test_reapply_keeps_manifest_extra_models(
     assert "gpt-4o" in models
 
 
+def _write_credential_config(config_file: Path, api_key: str) -> None:
+    """Write an OpenCode config whose headroom provider carries a credential."""
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "headroom": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "Headroom Proxy",
+                        "options": {
+                            "baseURL": "http://127.0.0.1:8787/v1",
+                            "apiKey": api_key,
+                        },
+                        "models": {"deepseek-chat": {"name": "DeepSeek Chat"}},
+                    }
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _headroom_options(config_file: Path) -> dict:
+    return json.loads(config_file.read_text())["provider"]["headroom"]["options"]
+
+
+def _upstream_manifest() -> DeploymentManifest:
+    manifest = _manifest()
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/v1"}
+    return manifest
+
+
+def test_apply_keeps_user_credential_for_named_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider apiKey survives the install when an upstream is named (#4015).
+
+    OpenCode sends that key to the proxy, which forwards it to the upstream, so
+    dropping it leaves the listed models unusable.
+    """
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+
+    apply_provider_scope(_upstream_manifest())
+
+    options = _headroom_options(config_file)
+    assert options["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+    # Headroom still owns the proxy URL.
+    assert options["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_apply_drops_user_credential_without_named_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a named upstream the proxy forwards to OpenAI: drop the key."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+
+    apply_provider_scope(_manifest())
+
+    options = _headroom_options(config_file)
+    assert "apiKey" not in options
+    assert options["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_reapply_keeps_user_credential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-running install apply keeps the credential (#4015).
+
+    The deactivate rewrites the config without the provider entry, so the
+    credential has to come back from the deployment state.
+    """
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+    assert "headroom" not in json.loads(config_file.read_text()).get("provider", {})
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_credential_added_after_install_survives_reactivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key written into the config after the install survives the cycle."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    data = json.loads(config_file.read_text())
+    data["provider"]["headroom"]["options"]["apiKey"] = "sk-user-key"
+    config_file.write_text(json.dumps(data, indent=2) + "\n")
+
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+    assert manifest.provider_options["opencode"] == {"apiKey": "sk-user-key"}
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "sk-user-key"
+
+
+def test_install_apply_carries_credential_into_the_new_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-apply builds a fresh manifest: the credential must carry over (#4015)."""
+    from headroom.cli import install as cli_install
+
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    existing = _upstream_manifest()
+    existing.targets = ["opencode"]
+    mutation = apply_provider_scope(existing)
+    assert mutation is not None
+    existing.mutations = [mutation]
+
+    new = _upstream_manifest()
+    new.targets = ["opencode"]
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+
+    assert new.provider_options["opencode"] == {"apiKey": "{env:DEEPSEEK_API_KEY}"}
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
 @pytest.mark.windows_newline
 def test_provider_config_writes_pin_lf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Provider edits and stale managed-block cleanup pin LF and preserve user config."""

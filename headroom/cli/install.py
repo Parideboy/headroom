@@ -684,6 +684,11 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
             _save_recovery_snapshot(existing, profile)
             recovery_saved = True
             _remove_deployment(existing)
+            # A provider credential is deployment state, not command-line state:
+            # the deactivate above rewrote the tool config without it, and the
+            # new manifest is built from the flags. Carry it over.
+            for target, options in (existing.provider_options or {}).items():
+                manifest.provider_options.setdefault(target, options)
 
     except Exception as exc:
         recovery_detail = (

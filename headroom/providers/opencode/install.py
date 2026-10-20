@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 from headroom import fsutil
 from headroom.install.models import ConfigScope, DeploymentManifest, ManagedMutation, ToolTarget
@@ -19,6 +20,76 @@ from .config import (
     snapshot_opencode_config_if_unwrapped,
     strip_opencode_headroom_blocks,
 )
+
+# Options Headroom owns: the proxy URL always points at the local proxy, so a
+# kept user option must never repoint it.
+_PROXY_OWNED_OPTIONS = frozenset({"baseURL"})
+
+
+def _named_upstream(manifest: DeploymentManifest) -> bool:
+    """True when the deployment forwards OpenAI-compatible traffic to a named upstream.
+
+    Only then may a third-party credential stay in the OpenCode config: with
+    the default upstream the proxy forwards to OpenAI, and a kept DeepSeek key
+    would be sent there. Mirrors the wrap path, which keeps the user's entries
+    only for an explicit upstream.
+    """
+    base_env = manifest.base_env or {}
+    if (base_env.get("OPENAI_TARGET_API_URL") or "").strip():
+        return True
+    return "--openai-api-url" in (manifest.proxy_args or [])
+
+
+def _user_options(entry: Any) -> dict[str, Any]:
+    """Return the user-owned options of a ``headroom`` provider entry."""
+    if not isinstance(entry, dict):
+        return {}
+    options = entry.get("options")
+    if not isinstance(options, dict):
+        return {}
+    return {k: v for k, v in options.items() if k not in _PROXY_OWNED_OPTIONS}
+
+
+def _headroom_entry(data: dict[str, Any]) -> Any:
+    """Return the ``headroom`` provider entry of a parsed config."""
+    providers = data.get("provider")
+    return providers.get("headroom") if isinstance(providers, dict) else None
+
+
+def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
+    """Return the provider options kept in the deployment state."""
+    store = manifest.provider_options
+    if not isinstance(store, dict):
+        return {}
+    options = store.get(ToolTarget.OPENCODE.value)
+    return dict(options) if isinstance(options, dict) else {}
+
+
+def _store_options(manifest: DeploymentManifest, options: dict[str, Any]) -> None:
+    """Keep the provider options in the deployment state."""
+    store = manifest.provider_options
+    if not isinstance(store, dict):
+        store = {}
+        manifest.provider_options = store
+    store[ToolTarget.OPENCODE.value] = dict(options)
+
+
+def _capture_options(path: Path, manifest: DeploymentManifest) -> None:
+    """Store the credential from the config in the deployment state.
+
+    Called before the provider entry is removed: the config is rewritten
+    without it, so a key the user configured would be gone for the next
+    activation.
+    """
+    if not _named_upstream(manifest) or not path.exists():
+        return
+    try:
+        data = _parse_json_loose(fsutil.read_text(path))
+    except OSError:
+        return
+    options = _user_options(_headroom_entry(data))
+    if options:
+        _store_options(manifest, {**_stored_options(manifest), **options})
 
 
 def build_install_env(*, port: int, backend: str) -> dict[str, str]:
@@ -49,7 +120,21 @@ def apply_provider_scope(manifest: DeploymentManifest) -> ManagedMutation | None
     # reverts (restoring the pre-install backup) and then replaces the whole
     # `headroom` entry, so ids hand-added there do not survive.
     extra_models = extra_models_from_env(manifest.base_env)
-    provider = {"headroom": headroom_provider_entry(manifest.port, extra_models)}
+    entry = headroom_provider_entry(manifest.port, extra_models)
+
+    # OpenCode sends the provider's apiKey to the proxy, which forwards it to
+    # the upstream. The credential belongs to the user, so keep it -- but only
+    # when the deployment names the upstream, and only the credential: Headroom
+    # owns npm, name, baseURL and models. It is read from the config and from
+    # the deployment state, which holds it across the deactivate/activate
+    # cycle that rewrites the config without it.
+    if _named_upstream(manifest):
+        preserved = {**_stored_options(manifest), **_user_options(_headroom_entry(data))}
+        if preserved:
+            entry["options"] = {**preserved, **entry["options"]}
+            _store_options(manifest, preserved)
+
+    provider = {"headroom": entry}
     data = _inject_key_into_json(data, "provider", provider)
 
     config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -81,12 +166,13 @@ def revert_provider_scope(
     Final removal restores the pre-install snapshot when available. Temporary
     deactivation removes only the managed provider and retains that snapshot.
     """
-    del manifest
     if not mutation.path:
         return
     path = Path(mutation.path)
     backup_file = path.with_name(path.name + ".headroom-backup")
     migrate_legacy_opencode_jsonc_backup(path, backup_file)
+    # Keep the credential before the provider entry goes away.
+    _capture_options(path, manifest)
     if restore_backup and backup_file.exists():
         try:
             restore_opencode_backup(str(path), str(backup_file))
