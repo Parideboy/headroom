@@ -199,11 +199,17 @@ from headroom.providers.opencode.config import (
     _MCP_MARKER_START,
     _PROVIDER_MARKER_END,  # noqa: F401
     _PROVIDER_MARKER_START,
+    _parse_json_loose,
+    clear_managed_state,
     extra_models_from_env,
     inject_opencode_provider_config,
     migrate_legacy_opencode_jsonc_backup,
+    opencode_config_is_empty,
     opencode_config_paths,
     parse_extra_model_spec,
+    read_managed_state,
+    record_opencode_config_origin,
+    remove_managed_opencode_provider,
     snapshot_opencode_config_if_unwrapped,
     strip_opencode_headroom_blocks,
 )
@@ -8613,6 +8619,9 @@ def opencode(
     # `headroom unwrap opencode` can restore the user's pre-wrap state.
     _opencode_config_file, _opencode_backup_file = opencode_config_paths()
     snapshot_opencode_config_if_unwrapped(_opencode_config_file, _opencode_backup_file)
+    # Without a pre-wrap file there is no backup to restore, so record that
+    # Headroom owns the file it is about to create.
+    record_opencode_config_origin(_opencode_config_file)
 
     # Register headroom MCP server in OpenCode config so OpenCode can
     # call headroom_retrieve on compression markers from the proxy.
@@ -8784,13 +8793,15 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
 
     * If a pre-wrap backup (``opencode.json.headroom-backup``) exists, the
       original file is restored byte-for-byte and the backup is removed.
+    * Otherwise, if Headroom recorded what it owns in the config (the
+      ``opencode.json.headroom-managed.json`` sidecar), the injected model
+      ids and baseURL are removed and the rest of the file is preserved.
     * Otherwise, if the config file still contains the Headroom-managed
       block, that block is stripped out and the rest of the file is
       preserved.
     * If the config only ever contained Headroom-written content, the file
       is removed entirely so OpenCode falls back to its defaults.
-    * If neither a backup nor a Headroom block is present, this is a safe
-      no-op.
+    * If none of the above applies, this is a safe no-op.
     """
     click.echo()
     click.echo("  ╔═══════════════════════════════════════════════╗")
@@ -8800,6 +8811,8 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
 
     config_file, backup_file = opencode_config_paths()
     migrate_legacy_opencode_jsonc_backup(config_file, backup_file)
+    managed_state = read_managed_state(config_file)
+    removed_managed = False
 
     if backup_file.exists():
         try:
@@ -8811,6 +8824,28 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
             raise click.ClickException(
                 f"could not restore OpenCode config from backup: {exc}"
             ) from exc
+        clear_managed_state(config_file)
+    elif config_file.exists() and managed_state is not None:
+        # Headroom wrote this file (or part of it) and recorded what it owns:
+        # undo exactly that, and keep everything the user added.
+        content = _read_text(config_file)
+        data = _parse_json_loose(content)
+        if not data and content.strip():
+            # Unparseable config: leave it alone rather than rewrite it.
+            click.echo(f"  Nothing to undo: {config_file} is not valid JSON.")
+            status = "noop"
+        elif remove_managed_opencode_provider(data, managed_state):
+            _write_text(config_file, json.dumps(data, indent=2) + "\n")
+            click.echo(
+                f"  Removed Headroom's provider entry from {config_file}; other content preserved."
+            )
+            status = "cleaned"
+            removed_managed = True
+            clear_managed_state(config_file)
+        else:
+            click.echo(f"  Nothing to undo: {config_file} has no Headroom-managed provider entry.")
+            status = "noop"
+            clear_managed_state(config_file)
     elif config_file.exists():
         content = _read_text(config_file)
         if _PROVIDER_MARKER_START in content or _MCP_MARKER_START in content:
@@ -8829,6 +8864,7 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
     else:
         click.echo(f"  Nothing to undo: {config_file} does not exist.")
         status = "noop"
+        clear_managed_state(config_file)
 
     # Remove Serena MCP if it was installed by Headroom.
     # Also remove the headroom MCP server itself.
@@ -8843,6 +8879,19 @@ def unwrap_opencode(port: int, no_stop_proxy: bool) -> None:
             click.echo("  Removed Headroom-installed Serena MCP server from OpenCode.")
         elif serena_status == "failed":
             click.echo("  Serena MCP server matched Headroom ledger but could not be removed.")
+
+    # A config Headroom created has no pre-wrap content to restore, so it is
+    # removed once the Headroom-owned entries are gone.
+    if (
+        removed_managed
+        and managed_state is not None
+        and managed_state.created_file
+        and config_file.exists()
+        and opencode_config_is_empty(config_file)
+    ):
+        config_file.unlink()
+        click.echo(f"  Removed {config_file} (contained only Headroom-written config).")
+        status = "removed"
 
     click.echo()
     click.echo("✓ OpenCode is no longer routed through the Headroom proxy.")
