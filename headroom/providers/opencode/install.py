@@ -81,12 +81,9 @@ def _capture_options(path: Path, manifest: DeploymentManifest) -> None:
     without it, so a key the user configured would be gone for the next
     activation.
     """
-    if not _named_upstream(manifest) or not path.exists():
+    if not _named_upstream(manifest):
         return
-    try:
-        data = _parse_json_loose(fsutil.read_text(path))
-    except OSError:
-        return
+    data = _parse_json_loose(fsutil.read_text(path, default=""))
     options = _user_options(_headroom_entry(data))
     if options:
         _store_options(manifest, {**_stored_options(manifest), **options})

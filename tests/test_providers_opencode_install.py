@@ -283,6 +283,80 @@ def _headroom_options(config_file: Path) -> dict:
     return json.loads(config_file.read_text())["provider"]["headroom"]["options"]
 
 
+def test_revert_without_a_credential_stores_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider entry without a credential must not land in the state."""
+    _opencode_config_file(tmp_path, monkeypatch)
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    assert manifest.provider_options == {}
+
+
+def test_apply_keeps_user_credential_for_openai_api_url_arg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--openai-api-url`` in the proxy args names the upstream too."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _manifest()
+    manifest.proxy_args = [
+        "--host",
+        "127.0.0.1",
+        "--openai-api-url",
+        "https://api.deepseek.com/v1",
+    ]
+
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"provider": {"headroom": "not-a-provider"}},
+        {"provider": "not-a-mapping"},
+        {"provider": {"headroom": {"options": "not-a-mapping"}}},
+    ],
+    ids=["provider-not-a-mapping", "headroom-not-a-mapping", "options-not-a-mapping"],
+)
+def test_apply_survives_a_malformed_provider_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: dict
+) -> None:
+    """A hand-mangled config must not crash the install."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps(config, indent=2) + "\n")
+
+    apply_provider_scope(_upstream_manifest())
+
+    assert _headroom_options(config_file)["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+@pytest.mark.parametrize(
+    "store",
+    [None, {"opencode": "not-a-mapping"}],
+    ids=["store-not-a-mapping", "options-not-a-mapping"],
+)
+def test_apply_survives_a_malformed_option_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: dict | None
+) -> None:
+    """A hand-edited manifest must not crash the install."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+    manifest.provider_options = store  # type: ignore[assignment]
+
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
 def _upstream_manifest() -> DeploymentManifest:
     manifest = _manifest()
     manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/v1"}
