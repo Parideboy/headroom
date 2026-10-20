@@ -2017,6 +2017,29 @@ def test_unwrap_opencode_removes_a_freshly_wrapped_config_with_mcp(
     assert not _managed_state_path(config_file).exists()
 
 
+def test_unwrap_opencode_removes_a_directly_injected_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injecting the provider directly and then unwrapping leaves no config."""
+    from headroom.providers.opencode.config import inject_opencode_provider_config
+
+    monkeypatch.chdir(tmp_path)
+    _set_test_home(monkeypatch, tmp_path)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    inject_opencode_provider_config(
+        port=8787, extra_models={"my-model": {"name": "My Model", "limit": {}}}
+    )
+    assert "my-model" in config_file.read_text(encoding="utf-8")
+
+    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
+        wrap_mod.unwrap_opencode.callback(port=8787, no_stop_proxy=True)
+
+    assert not config_file.exists()
+    assert not _managed_state_path(config_file).exists()
+
+
 def test_unwrap_opencode_keeps_user_content_added_after_a_fresh_wrap(
     runner: CliRunner,
     tmp_path: Path,
