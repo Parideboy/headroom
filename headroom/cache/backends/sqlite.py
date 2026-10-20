@@ -72,6 +72,11 @@ _PURGE_SQL = (
 # Purge expired rows at most this often (seconds). Purging is hygiene,
 # not correctness — CompressionStore checks TTL on every get().
 _PURGE_INTERVAL = 60.0
+# How often _open() re-reads the legacy rows it could not backfill because a
+# sibling worker rewrote them meanwhile. One pass is the normal case; the
+# extra passes pick up a row that a concurrent legacy writer (an older build
+# that does not know the column) replaced, using its current content.
+_MAX_BACKFILL_PASSES = 3
 # items() decodes every row on each eviction pass, so an unreadable row warns
 # once per hash per hour (WarnOnce's window), for at most this many hashes per
 # hour; further ones log at debug only. A row that stays broken warns again
@@ -148,15 +153,28 @@ class SQLiteBackend:
         # Legacy rows carry last_accessed in their JSON but no expires_at.
         # Derive it before the sweep below, or a recently-retrieved original
         # would be purged on the old created_at + ttl wall clock.
-        legacy = conn.execute(
-            "SELECT hash, entry_json FROM ccr_entries WHERE expires_at IS NULL"
-        ).fetchall()
-        for hash_key, raw in legacy:
-            entry = self._entry_from_json(raw, hash_key)
-            if entry is not None:
+        #
+        # The backfill is conditional. A sibling worker on the same file can
+        # refresh or replace a row between this read and the write, and
+        # writing the snapshot's deadline anyway would overwrite a newer one
+        # — the sweep below would then delete a row the sibling had just
+        # kept alive. The write therefore only lands while the row is still
+        # the legacy row that was read (same JSON, no deadline yet), and a
+        # row that changed under us is re-read on the next pass.
+        for _ in range(_MAX_BACKFILL_PASSES):
+            legacy = conn.execute(
+                "SELECT hash, entry_json FROM ccr_entries WHERE expires_at IS NULL"
+            ).fetchall()
+            if not legacy:
+                break
+            for hash_key, raw in legacy:
+                entry = self._entry_from_json(raw, hash_key)
+                if entry is None:
+                    continue
                 conn.execute(
-                    "UPDATE ccr_entries SET expires_at = ? WHERE hash = ?",
-                    (entry.expires_at, hash_key),
+                    "UPDATE ccr_entries SET expires_at = ? "
+                    "WHERE hash = ? AND expires_at IS NULL AND entry_json = ?",
+                    (entry.expires_at, hash_key, raw),
                 )
         # Startup hygiene: expired rows are only purged opportunistically
         # on writes, so a quiet store could otherwise hold expired

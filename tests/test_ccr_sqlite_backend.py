@@ -46,6 +46,66 @@ def db_path(tmp_path):
     return tmp_path / "ccr_test.db"
 
 
+def write_legacy_file(db_path, entries):
+    """Create a pre-migration ccr_entries file (no expires_at column)."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE ccr_entries (hash TEXT PRIMARY KEY, entry_json TEXT NOT NULL, "
+        "created_at REAL NOT NULL, ttl INTEGER NOT NULL)"
+    )
+    for entry in entries:
+        data = asdict(entry)
+        del data["max_lifetime"]  # absent from pre-#2604 rows
+        conn.execute(
+            "INSERT INTO ccr_entries VALUES (?, ?, ?, ?)",
+            (entry.hash, json.dumps(data), entry.created_at, entry.ttl),
+        )
+    conn.commit()
+    conn.close()
+
+
+def sibling_write(db_path, entry, include_expires_at=True):
+    """Write a row from another connection, the way SQLiteBackend.set() does."""
+    conn = sqlite3.connect(db_path)
+    payload = json.dumps(asdict(entry), ensure_ascii=False)
+    if include_expires_at:
+        conn.execute(
+            "INSERT OR REPLACE INTO ccr_entries "
+            "(hash, entry_json, created_at, ttl, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (entry.hash, payload, entry.created_at, entry.ttl, entry.expires_at),
+        )
+    else:
+        # An older build sharing the file does not know the column, so the
+        # row it writes carries no deadline at all.
+        conn.execute(
+            "INSERT OR REPLACE INTO ccr_entries (hash, entry_json, created_at, ttl) "
+            "VALUES (?, ?, ?, ?)",
+            (entry.hash, payload, entry.created_at, entry.ttl),
+        )
+    conn.commit()
+    conn.close()
+
+
+def interleave_sibling_write(monkeypatch, action):
+    """Run `action` between the startup's read of the legacy rows and its write.
+
+    The startup reads the legacy rows, then decodes each one before writing
+    its deadline back. Decoding is the seam where a sibling worker's write
+    lands in between.
+    """
+    original = SQLiteBackend._entry_from_json
+    fired = False
+
+    def racing(self, raw, hash_key):
+        nonlocal fired
+        if not fired:
+            fired = True
+            action()
+        return original(self, raw, hash_key)
+
+    monkeypatch.setattr(SQLiteBackend, "_entry_from_json", racing)
+
+
 class TestSQLiteBackend:
     def test_crud_roundtrip(self, db_path):
         b = SQLiteBackend(db_path)
@@ -194,23 +254,13 @@ class TestSQLiteBackend:
         # A file from before the expires_at column: the purge must honor the
         # stored last_accessed, not the legacy created_at + ttl wall clock.
         now = time.time()
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE ccr_entries (hash TEXT PRIMARY KEY, entry_json TEXT NOT NULL, "
-            "created_at REAL NOT NULL, ttl INTEGER NOT NULL)"
-        )
+        entries = []
         for hash_key, last_accessed in (("warm", now - 10), ("cold", now - 100)):
             entry = make_entry(hash_key, ttl=60)
             entry.created_at = now - 100
             entry.last_accessed = last_accessed
-            data = asdict(entry)
-            del data["max_lifetime"]  # absent from pre-#2604 rows
-            conn.execute(
-                "INSERT INTO ccr_entries VALUES (?, ?, ?, ?)",
-                (hash_key, json.dumps(data), entry.created_at, entry.ttl),
-            )
-        conn.commit()
-        conn.close()
+            entries.append(entry)
+        write_legacy_file(db_path, entries)
 
         b = SQLiteBackend(db_path)
 
@@ -220,6 +270,87 @@ class TestSQLiteBackend:
             "SELECT expires_at FROM ccr_entries WHERE hash = 'warm'"
         ).fetchone()
         assert expires_at == pytest.approx(now + 50)
+
+    def test_startup_backfill_does_not_clobber_a_concurrent_refresh(self, db_path, monkeypatch):
+        # A sibling worker on the same file can refresh a row between the
+        # startup's read of the legacy rows and its write of the deadline.
+        # Writing the stale snapshot's deadline anyway overwrites the
+        # sibling's newer one, and the sweep right after it deletes the row
+        # the sibling had just kept alive.
+        now = time.time()
+        stale = make_entry("h", ttl=60)
+        stale.created_at = now - 120
+        stale.last_accessed = now - 100  # idle-expired in this snapshot
+        write_legacy_file(db_path, [stale])
+
+        refreshed = make_entry("h", ttl=60)
+        refreshed.created_at = now - 120
+        refreshed.last_accessed = now
+        interleave_sibling_write(monkeypatch, lambda: sibling_write(db_path, refreshed))
+
+        b = SQLiteBackend(db_path)
+
+        assert b.get("h") is not None, "the startup sweep deleted a live row"
+        (expires_at, raw) = b._conn.execute(
+            "SELECT expires_at, entry_json FROM ccr_entries WHERE hash = 'h'"
+        ).fetchone()
+        assert expires_at == pytest.approx(refreshed.expires_at)
+        # The stored deadline agrees with the entry that is stored now.
+        stored = json.loads(raw)
+        assert expires_at == pytest.approx(stored["last_accessed"] + stored["ttl"])
+
+    def test_startup_backfill_does_not_clobber_a_concurrent_replacement(self, db_path, monkeypatch):
+        # Same hash, different entry: the startup must not write the old
+        # entry's deadline onto the replacement.
+        now = time.time()
+        stale = make_entry("h", ttl=60)
+        stale.created_at = now - 120
+        stale.last_accessed = now - 100
+        write_legacy_file(db_path, [stale])
+
+        replacement = make_entry("h", content="y" * 600, ttl=120)
+        replacement.created_at = now
+        replacement.last_accessed = now
+        interleave_sibling_write(monkeypatch, lambda: sibling_write(db_path, replacement))
+
+        b = SQLiteBackend(db_path)
+
+        entry = b.get("h")
+        assert entry is not None, "the startup sweep deleted a live row"
+        assert entry.original_content == replacement.original_content
+        (expires_at,) = b._conn.execute(
+            "SELECT expires_at FROM ccr_entries WHERE hash = 'h'"
+        ).fetchone()
+        assert expires_at == pytest.approx(replacement.expires_at)
+
+    def test_startup_backfill_does_not_clobber_a_concurrent_legacy_write(
+        self, db_path, monkeypatch
+    ):
+        # An older build sharing the file does not know the expires_at column
+        # and rewrites the row without it. The startup must not keep the
+        # deadline it derived from the row it read before that write; it
+        # re-reads the row and backfills it from its current content.
+        now = time.time()
+        stale = make_entry("h", ttl=60)
+        stale.created_at = now - 120
+        stale.last_accessed = now - 100
+        write_legacy_file(db_path, [stale])
+
+        legacy_write = make_entry("h", ttl=60)
+        legacy_write.created_at = now - 120
+        legacy_write.last_accessed = now
+        interleave_sibling_write(
+            monkeypatch,
+            lambda: sibling_write(db_path, legacy_write, include_expires_at=False),
+        )
+
+        b = SQLiteBackend(db_path)
+
+        assert b.get("h") is not None, "the startup sweep deleted a live row"
+        (expires_at,) = b._conn.execute(
+            "SELECT expires_at FROM ccr_entries WHERE hash = 'h'"
+        ).fetchone()
+        assert expires_at == pytest.approx(legacy_write.expires_at)
 
     def test_purge_expired_deletes_by_deadline_and_keeps_the_boundary_row(self, db_path):
         b = SQLiteBackend(db_path)
