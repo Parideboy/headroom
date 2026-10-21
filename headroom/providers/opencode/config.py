@@ -299,6 +299,21 @@ def remove_managed_opencode_provider(data: dict[str, Any], state: OpencodeManage
     return changed
 
 
+def _is_empty_config_section(value: Any) -> bool:
+    """Return whether a config value carries no content.
+
+    An empty section (and a section that only holds empty sections) carries
+    nothing. A scalar counts as content even when it is falsy: a user
+    setting such as ``"autoupdate": false`` is a real preference, not an
+    empty section.
+    """
+    if isinstance(value, dict):
+        return all(_is_empty_config_section(item) for item in value.values())
+    if isinstance(value, list):
+        return not value
+    return False
+
+
 def opencode_config_is_empty(config_file: Path) -> bool:
     """Return whether the config file holds nothing but empty sections.
 
@@ -315,7 +330,7 @@ def opencode_config_is_empty(config_file: Path) -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    return not any(data.values())
+    return all(_is_empty_config_section(value) for value in data.values())
 
 
 def migrate_legacy_opencode_jsonc_backup(config_file: Path, backup_file: Path) -> None:

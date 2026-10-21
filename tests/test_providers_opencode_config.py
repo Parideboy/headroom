@@ -1089,7 +1089,20 @@ def test_opencode_config_is_empty_only_for_empty_configs(tmp_path: Path) -> None
     config_file.write_text('{"provider": {}}', encoding="utf-8")
     assert opencode_config_is_empty(config_file) is True
 
+    config_file.write_text('{"provider": {"headroom": {}}}', encoding="utf-8")
+    assert opencode_config_is_empty(config_file) is True
+
     config_file.write_text('{"theme": "dark"}', encoding="utf-8")
+    assert opencode_config_is_empty(config_file) is False
+
+    # A falsy user setting is content, not an empty section.
+    config_file.write_text('{"autoupdate": false}', encoding="utf-8")
+    assert opencode_config_is_empty(config_file) is False
+
+    config_file.write_text('{"retries": 0}', encoding="utf-8")
+    assert opencode_config_is_empty(config_file) is False
+
+    config_file.write_text('{"model": ""}', encoding="utf-8")
     assert opencode_config_is_empty(config_file) is False
 
     config_file.write_text("not json", encoding="utf-8")

@@ -2040,6 +2040,35 @@ def test_unwrap_opencode_removes_a_directly_injected_config(
     assert not _managed_state_path(config_file).exists()
 
 
+def test_unwrap_opencode_keeps_a_falsy_user_setting(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user setting that is false is content, not an empty section."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HEADROOM_CONTEXT_TOOL", raising=False)
+    monkeypatch.delenv("HEADROOM_OPENCODE_EXTRA_MODELS", raising=False)
+    _set_test_home(monkeypatch, tmp_path)
+
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+
+    with patch.object(wrap_mod.shutil, "which", return_value="opencode"):
+        wrapped = _prepare_only_wrap(runner)
+    assert wrapped.exit_code == 0, wrapped.output
+
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    data["autoupdate"] = False
+    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    with patch.object(wrap_mod, "_stop_local_proxy_for_unwrap", return_value="stopped"):
+        result = runner.invoke(main, ["unwrap", "opencode"])
+
+    assert result.exit_code == 0, result.output
+    assert config_file.exists(), "the user setting must not cost the user the file"
+    assert json.loads(config_file.read_text(encoding="utf-8"))["autoupdate"] is False
+
+
 def test_unwrap_opencode_keeps_user_content_added_after_a_fresh_wrap(
     runner: CliRunner,
     tmp_path: Path,
