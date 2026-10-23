@@ -449,7 +449,11 @@ def test_credential_added_after_install_survives_reactivation(
     config_file.write_text(json.dumps(data, indent=2) + "\n")
 
     revert_provider_scope(mutation, manifest, restore_backup=False)
-    assert manifest.provider_options["opencode"] == {"apiKey": "sk-user-key"}
+    # provider_options now includes _upstream for upstream tracking
+    assert manifest.provider_options["opencode"] == {
+        "apiKey": "sk-user-key",
+        "_upstream": "https://api.deepseek.com/v1",
+    }
     apply_provider_scope(manifest)
 
     assert _headroom_options(config_file)["apiKey"] == "sk-user-key"
@@ -483,7 +487,11 @@ def test_install_apply_carries_credential_into_the_new_manifest(
 
     cli_install._apply_manifest(new)
 
-    assert new.provider_options["opencode"] == {"apiKey": "{env:DEEPSEEK_API_KEY}"}
+    # provider_options now includes _upstream for upstream tracking
+    assert new.provider_options["opencode"] == {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "_upstream": "https://api.deepseek.com/v1",
+    }
     assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
 
 
@@ -1071,3 +1079,154 @@ def test_unambiguous_legacy_backup_still_migrates_and_restores(
     revert_provider_scope(mutation, manifest)
     assert config.read_bytes() == original
     assert not canonical.exists()
+
+
+def test_install_apply_carries_credential_same_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same upstream: credential carries over on install apply."""
+    from headroom.cli import install as cli_install
+
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    existing = _upstream_manifest()
+    existing.targets = ["opencode"]
+    mutation = apply_provider_scope(existing)
+    assert mutation is not None
+    existing.mutations = [mutation]
+
+    new = _upstream_manifest()
+    new.targets = ["opencode"]
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+
+    # provider_options now includes _upstream for upstream tracking
+    assert new.provider_options["opencode"] == {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "_upstream": "https://api.deepseek.com/v1",
+    }
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_install_apply_drops_credential_changed_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changed upstream: credential is dropped on install apply."""
+    from headroom.cli import install as cli_install
+
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    existing = _upstream_manifest()
+    existing.targets = ["opencode"]
+    mutation = apply_provider_scope(existing)
+    assert mutation is not None
+    existing.mutations = [mutation]
+
+    # New manifest with different upstream
+    new = _upstream_manifest()
+    new.targets = ["opencode"]
+    new.base_env = {"OPENAI_TARGET_API_URL": "https://different-upstream.example/v1"}
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+
+    # Credential should be dropped - no opencode entry in provider_options
+    assert "opencode" not in new.provider_options
+    # Config should not have apiKey
+    options = _headroom_options(config_file)
+    assert "apiKey" not in options
+
+
+def test_apply_provider_scope_restart_keeps_same_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restart with same upstream keeps stored credential."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    # First apply - stores credential with upstream
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    # Revert without backup - captures credential
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+    assert manifest.provider_options["opencode"] == {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "_upstream": "https://api.deepseek.com/v1",
+    }
+
+    # Re-apply with same upstream - credential should be restored
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_apply_provider_scope_restart_drops_changed_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restart with changed upstream drops stored credential."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    # First apply - stores credential with upstream
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    # Revert without backup - captures credential
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+    assert manifest.provider_options["opencode"] == {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "_upstream": "https://api.deepseek.com/v1",
+    }
+
+    # Change upstream
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://different-upstream.example/v1"}
+
+    # Re-apply with changed upstream - credential should be dropped
+    apply_provider_scope(manifest)
+
+    options = _headroom_options(config_file)
+    assert "apiKey" not in options
+
+
+def test_legacy_untagged_state_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy state without _upstream is treated as bound to current upstream."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    # First apply - stores credential with upstream
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+
+    # Revert without backup - captures credential
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    # Manually remove _upstream to simulate legacy state
+    legacy_options = manifest.provider_options["opencode"].copy()
+    del legacy_options["_upstream"]
+    manifest.provider_options["opencode"] = legacy_options
+
+    # Re-apply with same upstream - legacy state should be used
+    apply_provider_scope(manifest)
+
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"

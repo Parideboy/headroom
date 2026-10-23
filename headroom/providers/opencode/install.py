@@ -40,6 +40,22 @@ def _named_upstream(manifest: DeploymentManifest) -> bool:
     return "--openai-api-url" in (manifest.proxy_args or [])
 
 
+def _upstream_identity(manifest: DeploymentManifest) -> str | None:
+    """Return the normalized upstream URL, or None when no upstream is named."""
+    base_env = manifest.base_env or {}
+    url = (base_env.get("OPENAI_TARGET_API_URL") or "").strip()
+    if url:
+        return url.rstrip("/").lower()
+    if "--openai-api-url" in (manifest.proxy_args or []):
+        # The value after --openai-api-url is the URL; parse it from proxy_args.
+        # Find the argument after --openai-api-url
+        args = manifest.proxy_args or []
+        for i, arg in enumerate(args):
+            if arg == "--openai-api-url" and i + 1 < len(args):
+                return args[i + 1].rstrip("/").lower()
+    return None
+
+
 def _user_options(entry: Any) -> dict[str, Any]:
     """Return the user-owned options of a ``headroom`` provider entry."""
     if not isinstance(entry, dict):
@@ -57,21 +73,57 @@ def _headroom_entry(data: dict[str, Any]) -> Any:
 
 
 def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
-    """Return the provider options kept in the deployment state."""
+    """Return the provider options kept in the deployment state.
+
+    Only returns options when the stored upstream matches the current
+    manifest's upstream. Legacy state without _upstream is treated as
+    bound to this manifest's own upstream.
+    """
     store = manifest.provider_options
     if not isinstance(store, dict):
         return {}
-    options = store.get(ToolTarget.OPENCODE.value)
-    return dict(options) if isinstance(options, dict) else {}
+    stored = store.get(ToolTarget.OPENCODE.value)
+    if not isinstance(stored, dict):
+        return {}
+
+    # Check upstream identity
+    current_upstream = _upstream_identity(manifest)
+    stored_upstream = stored.get("_upstream")
+
+    # Legacy state without _upstream: treat as bound to this manifest's upstream
+    if stored_upstream is None:
+        if current_upstream is not None:
+            return {k: v for k, v in stored.items() if k != "_upstream"}
+        return {}
+
+    # Upstream must match exactly
+    if stored_upstream != current_upstream:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Stored OpenCode credential upstream '%s' does not match current '%s'; "
+            "credential must be set again",
+            stored_upstream,
+            current_upstream,
+        )
+        return {}
+
+    # Return options without the internal _upstream key
+    return {k: v for k, v in stored.items() if k != "_upstream"}
 
 
 def _store_options(manifest: DeploymentManifest, options: dict[str, Any]) -> None:
-    """Keep the provider options in the deployment state."""
+    """Keep the provider options in the deployment state with upstream identity."""
     store = manifest.provider_options
     if not isinstance(store, dict):
         store = {}
         manifest.provider_options = store
-    store[ToolTarget.OPENCODE.value] = dict(options)
+
+    upstream = _upstream_identity(manifest)
+    to_store = dict(options)
+    if upstream is not None:
+        to_store["_upstream"] = upstream
+    store[ToolTarget.OPENCODE.value] = to_store
 
 
 def _capture_options(path: Path, manifest: DeploymentManifest) -> None:

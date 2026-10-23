@@ -56,7 +56,10 @@ from headroom.install.supervisors import (
     stop_supervisor,
 )
 from headroom.providers.opencode.config import extra_models_from_env
-from headroom.providers.opencode.install import restore_opencode_backup
+from headroom.providers.opencode.install import (
+    _upstream_identity,
+    restore_opencode_backup,
+)
 
 from .main import main
 
@@ -686,9 +689,24 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
             _remove_deployment(existing)
             # A provider credential is deployment state, not command-line state:
             # the deactivate above rewrote the tool config without it, and the
-            # new manifest is built from the flags. Carry it over.
+            # new manifest is built from the flags. Carry it over -- but only
+            # when the upstream identity matches, so credentials stay bound to
+            # their destination. Legacy untagged state is treated as bound to
+            # the existing manifest's upstream.
+            existing_upstream = _upstream_identity(existing) if existing else None
+            new_upstream = _upstream_identity(manifest)
             for target, options in (existing.provider_options or {}).items():
-                manifest.provider_options.setdefault(target, options)
+                # Only carry opencode options when upstream matches
+                if target == "opencode":
+                    # Legacy state without _upstream: tag with existing's upstream
+                    if "_upstream" not in options:
+                        options = {**options, "_upstream": existing_upstream}
+                    if options.get("_upstream") == new_upstream:
+                        manifest.provider_options.setdefault(
+                            target, {k: v for k, v in options.items() if k != "_upstream"}
+                        )
+                else:
+                    manifest.provider_options.setdefault(target, options)
 
     except Exception as exc:
         recovery_detail = (
