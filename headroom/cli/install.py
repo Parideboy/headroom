@@ -693,12 +693,10 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
             # when the upstream identity matches, so credentials stay bound to
             # their destination. Legacy untagged state is treated as bound to
             # the existing manifest's upstream.
-            existing_upstream = _upstream_identity(existing) if existing else None
+            existing_upstream = _upstream_identity(existing)
             new_upstream = _upstream_identity(manifest)
             for target, options in (existing.provider_options or {}).items():
-                # Only carry opencode options when upstream matches
                 if target == "opencode":
-                    # Legacy state without _upstream: tag with existing's upstream
                     if "_upstream" not in options:
                         options = {**options, "_upstream": existing_upstream}
                     if options.get("_upstream") == new_upstream:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,9 @@ from .config import (
 _PROXY_OWNED_OPTIONS = frozenset({"baseURL"})
 
 
+logger = logging.getLogger(__name__)
+
+
 def _named_upstream(manifest: DeploymentManifest) -> bool:
     """True when the deployment forwards OpenAI-compatible traffic to a named upstream.
 
@@ -47,8 +51,6 @@ def _upstream_identity(manifest: DeploymentManifest) -> str | None:
     if url:
         return url.rstrip("/").lower()
     if "--openai-api-url" in (manifest.proxy_args or []):
-        # The value after --openai-api-url is the URL; parse it from proxy_args.
-        # Find the argument after --openai-api-url
         args = manifest.proxy_args or []
         for i, arg in enumerate(args):
             if arg == "--openai-api-url" and i + 1 < len(args):
@@ -86,7 +88,6 @@ def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
     if not isinstance(stored, dict):
         return {}
 
-    # Check upstream identity
     current_upstream = _upstream_identity(manifest)
     stored_upstream = stored.get("_upstream")
 
@@ -96,11 +97,8 @@ def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
             return {k: v for k, v in stored.items() if k != "_upstream"}
         return {}
 
-    # Upstream must match exactly
     if stored_upstream != current_upstream:
-        import logging
-
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Stored OpenCode credential upstream '%s' does not match current '%s'; "
             "credential must be set again",
             stored_upstream,
@@ -108,7 +106,6 @@ def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
         )
         return {}
 
-    # Return options without the internal _upstream key
     return {k: v for k, v in stored.items() if k != "_upstream"}
 
 
