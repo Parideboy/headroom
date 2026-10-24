@@ -1459,6 +1459,8 @@ def test_install_apply_migrates_stored_v1_credential_for_same_upstream(
         "_upstream_v": 2,
     }
     assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
 def test_apply_provider_scope_leaves_unparseable_config_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
