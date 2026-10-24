@@ -88,7 +88,7 @@ def _upstream_identity(manifest: DeploymentManifest) -> str | None:
     return _canonicalize_url(url)
 
 
-def _binding_matches(stored: dict, identity: str | None, raw: str | None = None) -> bool:
+def _binding_matches(stored: dict[str, Any], identity: str | None, raw: str | None = None) -> bool:
     """Return True when stored options match the current upstream identity.
 
     v2: exact equality with canonical identity.
@@ -96,7 +96,10 @@ def _binding_matches(stored: dict, identity: str | None, raw: str | None = None)
         the current identity's path+query has no uppercase (nothing was lost).
     Legacy (no _upstream): bound to the deployment's own upstream.
     """
-    stored_upstream = stored.get("_upstream")
+    raw_upstream = stored.get("_upstream")
+    if raw_upstream is not None and not isinstance(raw_upstream, str):
+        return False
+    stored_upstream = raw_upstream if isinstance(raw_upstream, str) else None
     version = stored.get("_upstream_v")
 
     if stored_upstream is None:
