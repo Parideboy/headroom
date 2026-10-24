@@ -703,7 +703,7 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
                     # Legacy untagged state is bound to the existing manifest's
                     # own upstream, so it can be compared against the new one.
                     if "_upstream" not in options:
-                        options = {**options, "_upstream": existing_upstream}
+                        options = {**options, "_upstream": existing_upstream, "_upstream_v": 2}
                     if _binding_matches(options, new_upstream, new_raw):
                         manifest.provider_options.setdefault(target, options)
                 else:

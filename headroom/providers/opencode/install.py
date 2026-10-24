@@ -151,7 +151,7 @@ def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
 
     if not _binding_matches(stored, current_upstream, current_raw):
         stored_upstream = stored.get("_upstream")
-        if stored_upstream is not None and "_upstream_v" not in stored:
+        if stored_upstream is not None:
             logger.warning(
                 "Stored OpenCode credential upstream '%s' does not match current '%s'; "
                 "credential must be set again",

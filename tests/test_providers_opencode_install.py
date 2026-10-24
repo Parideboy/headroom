@@ -1361,3 +1361,35 @@ def test_legacy_untagged_state_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     apply_provider_scope(manifest)
 
     assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_install_apply_carries_untagged_credential_for_mixed_case_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Untagged legacy state stays bound to its own upstream, path case included."""
+    from headroom.cli import install as cli_install
+
+    _opencode_config_file(tmp_path, monkeypatch)
+    url = "https://gateway.example/Tenant/V1"
+    existing = _manifest()
+    existing.base_env = {"OPENAI_TARGET_API_URL": url}
+    existing.targets = ["opencode"]
+    existing.provider_options = {"opencode": {"apiKey": "{env:GATEWAY_KEY}"}}
+
+    new = _manifest()
+    new.base_env = {"OPENAI_TARGET_API_URL": url}
+    new.targets = ["opencode"]
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+
+    assert new.provider_options["opencode"]["apiKey"] == "{env:GATEWAY_KEY}"
+    assert new.provider_options["opencode"]["_upstream"] == url
