@@ -947,10 +947,17 @@ def test_start_and_stop_supervisor_darwin_windows_and_none(monkeypatch) -> None:
     ]
 
 
-def test_windows_stop_tolerates_absent_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "ERROR: The system cannot find the file specified.",
+        'ERROR: The specified task name "headroom-default-health" does not exist in the system.',
+    ],
+)
+def test_windows_stop_tolerates_absent_tasks(monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
     # Session-scoped fallback installs never create the `-startup` task, and
     # the health task can be missing too, so stop must not raise when
-    # schtasks reports "the system cannot find the file specified".
+    # schtasks reports the task as missing.
     monkeypatch.setattr("headroom.install.supervisors.sys.platform", "win32")
     calls: list[list[str]] = []
     monkeypatch.setattr(
@@ -966,7 +973,7 @@ def test_windows_stop_tolerates_absent_tasks(monkeypatch: pytest.MonkeyPatch) ->
             {
                 "returncode": 1,
                 "stdout": "",
-                "stderr": "ERROR: The system cannot find the file specified.",
+                "stderr": stderr,
             },
         )()
 
