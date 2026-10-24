@@ -697,14 +697,19 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
             # the existing manifest's upstream.
             existing_upstream = _upstream_identity(existing)
             new_upstream = _upstream_identity(manifest)
-            new_raw = _upstream_url(manifest)
             for target, options in (existing.provider_options or {}).items():
                 if target == "opencode":
-                    # Legacy untagged state is bound to the existing manifest's
-                    # own upstream, so it can be compared against the new one.
-                    if "_upstream" not in options:
+                    # Older state is first bound to the existing deployment's own
+                    # destination: a v1 binding was lowercased, so it is trusted
+                    # only when the existing URL lost nothing to that. Only a
+                    # binding re-established as v2 is compared with the new one.
+                    if options.get("_upstream_v") != 2:
+                        if not _binding_matches(
+                            options, existing_upstream, _upstream_url(existing)
+                        ):
+                            continue
                         options = {**options, "_upstream": existing_upstream, "_upstream_v": 2}
-                    if _binding_matches(options, new_upstream, new_raw):
+                    if _binding_matches(options, new_upstream):
                         manifest.provider_options.setdefault(target, options)
                 else:
                     manifest.provider_options.setdefault(target, options)

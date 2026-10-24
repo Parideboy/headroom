@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1393,3 +1394,67 @@ def test_install_apply_carries_untagged_credential_for_mixed_case_path(
 
     assert new.provider_options["opencode"]["apiKey"] == "{env:GATEWAY_KEY}"
     assert new.provider_options["opencode"]["_upstream"] == url
+
+
+def _apply_stored_only(
+    monkeypatch: pytest.MonkeyPatch, old_url: str, new_url: str, stored: dict[str, Any]
+) -> DeploymentManifest:
+    """Run install apply where the credential lives only in the deployment state."""
+    from headroom.cli import install as cli_install
+
+    existing = _manifest()
+    existing.base_env = {"OPENAI_TARGET_API_URL": old_url}
+    existing.targets = ["opencode"]
+    existing.provider_options = {"opencode": dict(stored)}
+
+    new = _manifest()
+    new.base_env = {"OPENAI_TARGET_API_URL": new_url}
+    new.targets = ["opencode"]
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+    return new
+
+
+def test_install_apply_drops_stored_v1_credential_from_mixed_case_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v1 binding of a /V1 deployment cannot be trusted for a new /v1 one."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    new = _apply_stored_only(
+        monkeypatch,
+        "https://api.deepseek.com/V1",
+        "https://api.deepseek.com/v1",
+        {"apiKey": "{env:DEEPSEEK_API_KEY}", "_upstream": "https://api.deepseek.com/v1"},
+    )
+
+    assert "opencode" not in new.provider_options
+    assert "apiKey" not in _headroom_options(config_file)
+
+
+def test_install_apply_migrates_stored_v1_credential_for_same_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v1 binding whose deployment URL lost nothing to lowercasing carries as v2."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    new = _apply_stored_only(
+        monkeypatch,
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/v1",
+        {"apiKey": "{env:DEEPSEEK_API_KEY}", "_upstream": "https://api.deepseek.com/v1"},
+    )
+
+    assert new.provider_options["opencode"] == {
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
+    }
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
