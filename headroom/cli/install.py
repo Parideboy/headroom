@@ -57,7 +57,9 @@ from headroom.install.supervisors import (
 )
 from headroom.providers.opencode.config import extra_models_from_env
 from headroom.providers.opencode.install import (
+    _binding_matches,
     _upstream_identity,
+    _upstream_url,
     restore_opencode_backup,
 )
 
@@ -695,14 +697,15 @@ def _apply_manifest(manifest: DeploymentManifest) -> None:
             # the existing manifest's upstream.
             existing_upstream = _upstream_identity(existing)
             new_upstream = _upstream_identity(manifest)
+            new_raw = _upstream_url(manifest)
             for target, options in (existing.provider_options or {}).items():
                 if target == "opencode":
+                    # Legacy untagged state is bound to the existing manifest's
+                    # own upstream, so it can be compared against the new one.
                     if "_upstream" not in options:
                         options = {**options, "_upstream": existing_upstream}
-                    if options.get("_upstream") == new_upstream:
-                        manifest.provider_options.setdefault(
-                            target, {k: v for k, v in options.items() if k != "_upstream"}
-                        )
+                    if _binding_matches(options, new_upstream, new_raw):
+                        manifest.provider_options.setdefault(target, options)
                 else:
                     manifest.provider_options.setdefault(target, options)
 

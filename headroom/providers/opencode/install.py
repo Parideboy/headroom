@@ -7,6 +7,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from headroom import fsutil
 from headroom.install.models import ConfigScope, DeploymentManifest, ManagedMutation, ToolTarget
@@ -44,18 +45,75 @@ def _named_upstream(manifest: DeploymentManifest) -> bool:
     return "--openai-api-url" in (manifest.proxy_args or [])
 
 
-def _upstream_identity(manifest: DeploymentManifest) -> str | None:
-    """Return the normalized upstream URL, or None when no upstream is named."""
+def _canonicalize_url(raw: str) -> str:
+    """Canonicalize a URL for upstream identity: lowercase scheme/hostname, preserve path case."""
+    parts = urlsplit(raw)
+    scheme = parts.scheme.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    hostname = (parts.hostname or "").lower()
+    port = parts.port
+    netloc = hostname
+    if port is not None and port != default_port:
+        netloc = f"{hostname}:{port}"
+    if parts.username is not None:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo = f"{userinfo}:{parts.password}"
+        netloc = f"{userinfo}@{netloc}"
+    path = parts.path.rstrip("/")
+    query = parts.query
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def _upstream_url(manifest: DeploymentManifest) -> str | None:
+    """Return the raw upstream URL, or None when no upstream is named."""
     base_env = manifest.base_env or {}
     url = (base_env.get("OPENAI_TARGET_API_URL") or "").strip()
     if url:
-        return url.rstrip("/").lower()
+        return url
     if "--openai-api-url" in (manifest.proxy_args or []):
         args = manifest.proxy_args or []
         for i, arg in enumerate(args):
             if arg == "--openai-api-url" and i + 1 < len(args):
-                return args[i + 1].rstrip("/").lower()
+                return args[i + 1]
     return None
+
+
+def _upstream_identity(manifest: DeploymentManifest) -> str | None:
+    """Return the normalized upstream URL, or None when no upstream is named."""
+    url = _upstream_url(manifest)
+    if url is None:
+        return None
+    return _canonicalize_url(url)
+
+
+def _binding_matches(stored: dict, identity: str | None, raw: str | None = None) -> bool:
+    """Return True when stored options match the current upstream identity.
+
+    v2: exact equality with canonical identity.
+    v1 (_upstream present, no _upstream_v): case-insensitive match only when
+        the current identity's path+query has no uppercase (nothing was lost).
+    Legacy (no _upstream): bound to the deployment's own upstream.
+    """
+    stored_upstream = stored.get("_upstream")
+    version = stored.get("_upstream_v")
+
+    if stored_upstream is None:
+        return identity is not None
+
+    if version == 2:
+        return stored_upstream == identity
+
+    # v1: stored URL was fully lowercased
+    if identity is None:
+        return False
+    if identity.lower() != stored_upstream:
+        return False
+    if raw is not None:
+        parts = urlsplit(raw)
+        if any(c.isupper() for c in parts.path) or any(c.isupper() for c in parts.query):
+            return False
+    return True
 
 
 def _user_options(entry: Any) -> dict[str, Any]:
@@ -89,24 +147,20 @@ def _stored_options(manifest: DeploymentManifest) -> dict[str, Any]:
         return {}
 
     current_upstream = _upstream_identity(manifest)
-    stored_upstream = stored.get("_upstream")
+    current_raw = _upstream_url(manifest)
 
-    # Legacy state without _upstream: treat as bound to this manifest's upstream
-    if stored_upstream is None:
-        if current_upstream is not None:
-            return {k: v for k, v in stored.items() if k != "_upstream"}
+    if not _binding_matches(stored, current_upstream, current_raw):
+        stored_upstream = stored.get("_upstream")
+        if stored_upstream is not None and "_upstream_v" not in stored:
+            logger.warning(
+                "Stored OpenCode credential upstream '%s' does not match current '%s'; "
+                "credential must be set again",
+                stored_upstream,
+                current_upstream,
+            )
         return {}
 
-    if stored_upstream != current_upstream:
-        logger.warning(
-            "Stored OpenCode credential upstream '%s' does not match current '%s'; "
-            "credential must be set again",
-            stored_upstream,
-            current_upstream,
-        )
-        return {}
-
-    return {k: v for k, v in stored.items() if k != "_upstream"}
+    return {k: v for k, v in stored.items() if k not in ("_upstream", "_upstream_v")}
 
 
 def _store_options(manifest: DeploymentManifest, options: dict[str, Any]) -> None:
@@ -120,6 +174,7 @@ def _store_options(manifest: DeploymentManifest, options: dict[str, Any]) -> Non
     to_store = dict(options)
     if upstream is not None:
         to_store["_upstream"] = upstream
+        to_store["_upstream_v"] = 2
     store[ToolTarget.OPENCODE.value] = to_store
 
 

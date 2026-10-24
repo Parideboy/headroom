@@ -453,6 +453,7 @@ def test_credential_added_after_install_survives_reactivation(
     assert manifest.provider_options["opencode"] == {
         "apiKey": "sk-user-key",
         "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
     }
     apply_provider_scope(manifest)
 
@@ -491,6 +492,7 @@ def test_install_apply_carries_credential_into_the_new_manifest(
     assert new.provider_options["opencode"] == {
         "apiKey": "{env:DEEPSEEK_API_KEY}",
         "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
     }
     assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
 
@@ -1113,6 +1115,7 @@ def test_install_apply_carries_credential_same_upstream(
     assert new.provider_options["opencode"] == {
         "apiKey": "{env:DEEPSEEK_API_KEY}",
         "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
     }
     assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
 
@@ -1171,6 +1174,7 @@ def test_apply_provider_scope_restart_keeps_same_upstream(
     assert manifest.provider_options["opencode"] == {
         "apiKey": "{env:DEEPSEEK_API_KEY}",
         "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
     }
 
     # Re-apply with same upstream - credential should be restored
@@ -1196,6 +1200,7 @@ def test_apply_provider_scope_restart_drops_changed_upstream(
     assert manifest.provider_options["opencode"] == {
         "apiKey": "{env:DEEPSEEK_API_KEY}",
         "_upstream": "https://api.deepseek.com/v1",
+        "_upstream_v": 2,
     }
 
     # Change upstream
@@ -1206,6 +1211,132 @@ def test_apply_provider_scope_restart_drops_changed_upstream(
 
     options = _headroom_options(config_file)
     assert "apiKey" not in options
+
+
+def test_host_case_difference_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Host case difference still matches on install apply and restart."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.DEEPSEEK.com/v1"}
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+    assert manifest.provider_options["opencode"]["_upstream"] == "https://api.deepseek.com/v1"
+    assert manifest.provider_options["opencode"]["_upstream_v"] == 2
+
+    apply_provider_scope(manifest)
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_path_case_difference_drops_on_install_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/V1 vs /v1 is rejected on install apply."""
+    from headroom.cli import install as cli_install
+
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    existing = _upstream_manifest()
+    existing.targets = ["opencode"]
+    mutation = apply_provider_scope(existing)
+    assert mutation is not None
+    existing.mutations = [mutation]
+
+    new = _upstream_manifest()
+    new.targets = ["opencode"]
+    new.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/V1"}
+
+    monkeypatch.setattr(cli_install, "load_manifest", lambda profile: existing)
+    monkeypatch.setattr(cli_install, "_save_apply_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "save_manifest", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "install_supervisor", lambda manifest, **kwargs: [])
+    monkeypatch.setattr(cli_install, "_start_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "_stop_deployment", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "remove_supervisor", lambda manifest: None)
+    monkeypatch.setattr(cli_install, "delete_manifest", lambda profile: None)
+
+    cli_install._apply_manifest(new)
+
+    assert "opencode" not in new.provider_options
+    assert "apiKey" not in _headroom_options(config_file)
+
+
+def test_path_case_difference_drops_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/V1 vs /v1 is rejected on restart."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/V1"}
+
+    apply_provider_scope(manifest)
+    assert "apiKey" not in _headroom_options(config_file)
+
+
+def test_query_difference_drops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Query difference is rejected."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/v1?foo=bar"}
+
+    apply_provider_scope(manifest)
+    assert "apiKey" not in _headroom_options(config_file)
+
+
+def test_v1_lowercase_binding_migrates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A v1 binding migrates to v2 when nothing was lost."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    # Simulate a v1 binding (no _upstream_v)
+    stored = manifest.provider_options["opencode"]
+    del stored["_upstream_v"]
+    stored["_upstream"] = "https://api.deepseek.com/v1"
+
+    apply_provider_scope(manifest)
+    assert manifest.provider_options["opencode"]["_upstream_v"] == 2
+    assert _headroom_options(config_file)["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
+def test_v1_binding_vs_mixed_case_path_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v1 binding against a mixed-case path is dropped."""
+    config_file = _opencode_config_file(tmp_path, monkeypatch)
+    _write_credential_config(config_file, "{env:DEEPSEEK_API_KEY}")
+    manifest = _upstream_manifest()
+    manifest.base_env = {"OPENAI_TARGET_API_URL": "https://api.deepseek.com/V1"}
+
+    mutation = apply_provider_scope(manifest)
+    assert mutation is not None
+    revert_provider_scope(mutation, manifest, restore_backup=False)
+
+    # Simulate a v1 binding (no _upstream_v)
+    stored = manifest.provider_options["opencode"]
+    del stored["_upstream_v"]
+    stored["_upstream"] = "https://api.deepseek.com/v1"
+
+    apply_provider_scope(manifest)
+    assert "apiKey" not in _headroom_options(config_file)
 
 
 def test_legacy_untagged_state_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
