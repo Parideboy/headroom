@@ -474,7 +474,10 @@ class SemanticCacheLayer:
         Args:
             messages: Original messages
             response: Response from LLM
-            context: Optional context with query
+            context: Optional context with query. Pass the same OptimizationContext
+                used for `process`; omitting it stores under the unscoped
+                namespace, which only matches lookups whose context also has
+                empty provider, model and metadata.
 
         Returns:
             Cache key

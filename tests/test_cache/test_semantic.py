@@ -538,3 +538,43 @@ class TestSemanticCacheLayer:
 
         result = layer.process(messages, context)
         assert result.semantic_cache_hit is False
+
+
+class TestSemanticCoverage:
+    def test_process_namespace_none_delegates(self):
+        from headroom.cache import AnthropicCacheOptimizer, OptimizationContext, SemanticCacheLayer
+
+        layer = SemanticCacheLayer(AnthropicCacheOptimizer())
+        messages = [{"role": "user", "content": "hi"}]
+        context = OptimizationContext(provider="anthropic", model="m", metadata={"x": object()})
+        result = layer.process(messages, context)
+        assert result.semantic_cache_hit is False
+
+    def test_invalidate_namespaced_entry(self):
+        from headroom.cache.semantic import SemanticCache, SemanticCacheConfig
+
+        cache = SemanticCache(SemanticCacheConfig())
+        key = cache.put("q", "r", messages_hash="h1", namespace="ns-a")
+        assert cache.get("q", messages_hash="h1", namespace="ns-a") is not None
+        assert cache.invalidate(key) is True
+        assert cache.get("q", messages_hash="h1", namespace="ns-a") is None
+        cache.put("q", "r2", messages_hash="h1", namespace="ns-a")
+        assert cache.get("q", messages_hash="h1", namespace="ns-a").response == "r2"
+
+    def test_evict_oldest_removes_namespaced_index(self):
+        from headroom.cache.semantic import SemanticCache, SemanticCacheConfig
+
+        cache = SemanticCache(SemanticCacheConfig(max_entries=1))
+        cache.put("q1", "r1", messages_hash="h1", namespace="ns-a")
+        cache.put("q2", "r2", messages_hash="h2", namespace="ns-b")
+        assert cache.get("q1", messages_hash="h1", namespace="ns-a") is None
+
+    def test_context_free_store_policy(self):
+        from headroom.cache import AnthropicCacheOptimizer, OptimizationContext, SemanticCacheLayer
+
+        layer = SemanticCacheLayer(AnthropicCacheOptimizer())
+        messages = [{"role": "user", "content": "Hello!"}]
+        layer.store_response(messages, {"text": "hi"})
+        assert layer.process(messages, OptimizationContext()).semantic_cache_hit is True
+        ctx = OptimizationContext(provider="anthropic", model="claude-3-opus")
+        assert layer.process(messages, ctx).semantic_cache_hit is False
