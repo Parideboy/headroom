@@ -17,6 +17,7 @@ from headroom.tokenizers import (
     list_supported_models,
     register_tokenizer,
 )
+from headroom.tokenizers.base import coerce_countable_text
 
 
 class TestTiktokenCounter:
@@ -771,3 +772,114 @@ class TestThinkingBlockCounting:
             - count_content_blocks(unsigned, counter.count_text)
             == 750
         )
+
+
+class TestDictValuedTextFields:
+    """Structured (non-string) text fields must not crash token counting.
+
+    Regression (GH #4273): a dict-valued ``text`` block reached
+    ``tiktoken.encode`` unchanged and raised ``TypeError: unhashable type:
+    'dict'``, aborting compression for the whole request. The fix reuses
+    :func:`coerce_countable_text` so a non-string text-ish field is priced
+    like the JSON string it should have been.
+    """
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_text_block_counts_like_coerced_string(self, counter_cls):
+        counter = counter_cls()
+        text_dict = {"message": "non-string provider text"}
+        expected = coerce_countable_text(text_dict)
+
+        bad = {"role": "user", "content": [{"type": "text", "text": text_dict}]}
+        good = {"role": "user", "content": [{"type": "text", "text": expected}]}
+
+        assert counter.count_messages([bad]) == counter.count_messages([good])
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_text_block_does_not_mutate_input(self, counter_cls):
+        import copy
+
+        counter = counter_cls()
+        message = {
+            "role": "user",
+            "content": [{"type": "text", "text": {"message": "non-string provider text"}}],
+        }
+        original = copy.deepcopy(message)
+
+        counter.count_messages([message])
+
+        assert message == original
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_content_string_counts_like_coerced_string(self, counter_cls):
+        counter = counter_cls()
+        content_dict = {"message": "non-string provider text"}
+        expected = coerce_countable_text(content_dict)
+
+        bad = {"role": "user", "content": content_dict}
+        good = {"role": "user", "content": expected}
+
+        assert counter.count_messages([bad]) == counter.count_messages([good])
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_role_counts_like_coerced_string(self, counter_cls):
+        counter = counter_cls()
+        role_dict = {"role": "user"}
+        expected = coerce_countable_text(role_dict)
+
+        bad = {"role": role_dict, "content": "hi"}
+        good = {"role": expected, "content": "hi"}
+
+        assert counter.count_messages([bad]) == counter.count_messages([good])
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_tool_result_content_counts_like_coerced_string(self, counter_cls):
+        counter = counter_cls()
+        tr_dict = {"output": "non-string provider text"}
+        expected = coerce_countable_text(tr_dict)
+
+        bad = {
+            "role": "user",
+            "content": [{"type": "tool_result", "content": tr_dict}],
+        }
+        good = {
+            "role": "user",
+            "content": [{"type": "tool_result", "content": expected}],
+        }
+
+        assert counter.count_messages([bad]) == counter.count_messages([good])
+
+    @pytest.mark.parametrize(
+        "counter_cls",
+        [TiktokenCounter, EstimatingTokenCounter],
+        ids=["tiktoken", "estimator"],
+    )
+    def test_dict_thinking_counts_like_coerced_string(self, counter_cls):
+        counter = counter_cls()
+        thinking_dict = {"reasoning": "non-string provider text"}
+        expected = coerce_countable_text(thinking_dict)
+
+        bad = {"role": "assistant", "content": [{"type": "thinking", "thinking": thinking_dict}]}
+        good = {"role": "assistant", "content": [{"type": "thinking", "thinking": expected}]}
+
+        assert counter.count_messages([bad]) == counter.count_messages([good])

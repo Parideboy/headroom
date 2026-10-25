@@ -304,7 +304,9 @@ class TiktokenCounter(BaseTokenizer):
                         for part in value:
                             if isinstance(part, dict):
                                 if part.get("type") == "text":
-                                    total += self.count_text(part.get("text", ""))
+                                    total += self.count_text(
+                                        coerce_countable_text(part.get("text", ""))
+                                    )
                                 elif part.get("type") == "image_url":
                                     # Image tokens vary by detail level
                                     detail = part.get("image_url", {}).get("detail", "auto")
@@ -324,6 +326,11 @@ class TiktokenCounter(BaseTokenizer):
                                     total += self._count_content_parts([part])
                             elif isinstance(part, str):
                                 total += self.count_text(part)
+                    else:
+                        # A non-string, non-list content value (e.g. a dict the
+                        # provider emitted where a string was expected) is coerced
+                        # rather than silently dropped — see GH #4273.
+                        total += self.count_text(coerce_countable_text(value))
                 elif key == "role":
                     total += self.count_text(coerce_countable_text(value))
                 elif key == "name":
