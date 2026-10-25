@@ -823,15 +823,21 @@ class TestDictValuedTextFields:
         [TiktokenCounter, EstimatingTokenCounter],
         ids=["tiktoken", "estimator"],
     )
-    def test_dict_content_string_counts_like_coerced_string(self, counter_cls):
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {"type": "text", "text": {"message": "non-string provider text"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 20000}},
+        ],
+        ids=["text", "image"],
+    )
+    def test_unwrapped_content_block_counts_like_list_form(self, counter_cls, block):
+        # An image must keep its fixed estimate, not be priced as base64 text.
         counter = counter_cls()
-        content_dict = {"message": "non-string provider text"}
-        expected = coerce_countable_text(content_dict)
+        bare = {"role": "user", "content": block}
+        wrapped = {"role": "user", "content": [block]}
 
-        bad = {"role": "user", "content": content_dict}
-        good = {"role": "user", "content": expected}
-
-        assert counter.count_messages([bad]) == counter.count_messages([good])
+        assert counter.count_messages([bare]) == counter.count_messages([wrapped])
 
     @pytest.mark.parametrize(
         "counter_cls",

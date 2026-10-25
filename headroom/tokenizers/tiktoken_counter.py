@@ -297,6 +297,9 @@ class TiktokenCounter(BaseTokenizer):
                     continue
 
                 if key == "content":
+                    if isinstance(value, dict):
+                        # Unwrapped single block: price it like the list form (#4273).
+                        value = [value]
                     if isinstance(value, str):
                         total += self.count_text(value)
                     elif isinstance(value, list):
@@ -327,9 +330,6 @@ class TiktokenCounter(BaseTokenizer):
                             elif isinstance(part, str):
                                 total += self.count_text(part)
                     else:
-                        # A non-string, non-list content value (e.g. a dict the
-                        # provider emitted where a string was expected) is coerced
-                        # rather than silently dropped — see GH #4273.
                         total += self.count_text(coerce_countable_text(value))
                 elif key == "role":
                     total += self.count_text(coerce_countable_text(value))

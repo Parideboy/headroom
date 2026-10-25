@@ -215,6 +215,10 @@ class BaseTokenizer(ABC):
 
             # Count content
             content = message.get("content")
+            if isinstance(content, dict):
+                # A single block sent without its list wrapper is priced like
+                # the wrapped block, so images keep their fixed estimate (#4273).
+                content = [content]
             if content is not None:
                 if isinstance(content, str):
                     total += self.count_text(content)
@@ -222,9 +226,6 @@ class BaseTokenizer(ABC):
                     # Multi-part content (images, tool results, etc.)
                     total += self._count_content_parts(content)
                 else:
-                    # A non-string, non-list content value (e.g. a dict the
-                    # provider emitted where a string was expected) is coerced
-                    # rather than silently dropped — see GH #4273.
                     total += self.count_text(coerce_countable_text(content))
 
             # Count tool calls
