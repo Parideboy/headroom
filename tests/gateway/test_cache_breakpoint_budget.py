@@ -136,11 +136,41 @@ def test_openai_chat_replayed_markers_capped_oldest_first() -> None:
 
     assert count_cache_breakpoints(None, replayed, tools)["total"] == 6
     _, messages, tools_out, stats = enforce_cache_breakpoint_budget(
-        None, replayed, tools, client_messages=client
+        None, replayed, tools, client_messages=None
     )
     assert stats["repaired"]
     assert count_cache_breakpoints(None, messages, tools_out)["total"] <= 4
     assert "cache_control" in messages[-1]
+
+
+def test_openai_chat_budget_drops_stale_tool_marker_keeps_systems() -> None:
+    # Issue #4471: on the OpenAI chat path client_messages=None so
+    # normalize_message_cache_control's block-level legacy fallback cannot add
+    # a marker to a list-content user message and then cost a real system
+    # marker. Only the oldest-first drop runs, so stale replayed markers go
+    # first while system markers and the latest tool anchor are kept.
+    messages = [
+        # older replayed tool result carrying a marker: oldest, dropped first
+        {"role": "tool", "tool_call_id": "t1", "content": "stale", "cache_control": CC},
+        {"role": "system", "content": "system one", "cache_control": CC},
+        {"role": "system", "content": "system two", "cache_control": CC},
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        # latest tool result carrying a marker: kept
+        {"role": "tool", "tool_call_id": "t2", "content": "fresh", "cache_control": CC},
+    ]
+    tools = [{"type": "function", "function": {"name": "r"}, "cache_control": CC}]
+
+    assert count_cache_breakpoints(None, messages, tools)["total"] == 5
+    _, out, tools_out, stats = enforce_cache_breakpoint_budget(
+        None, messages, tools, client_messages=None
+    )
+    assert stats["repaired"]
+    assert count_cache_breakpoints(None, out, tools_out)["total"] <= 4
+    assert "cache_control" in out[1]
+    assert "cache_control" in out[2]
+    assert "cache_control" in out[-1]
+    assert "cache_control" not in out[0]
+    assert out[3] == {"role": "user", "content": [{"type": "text", "text": "hi"}]}
 
 
 def test_count_includes_tool_calls_markers() -> None:
