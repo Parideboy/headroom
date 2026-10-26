@@ -461,7 +461,9 @@ def count_cache_breakpoints(
             # OpenAI chat shape: markers on an assistant's tool_calls entries.
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
-                found += sum(1 for tc in tool_calls if isinstance(tc, dict) and "cache_control" in tc)
+                found += sum(
+                    1 for tc in tool_calls if isinstance(tc, dict) and "cache_control" in tc
+                )
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:

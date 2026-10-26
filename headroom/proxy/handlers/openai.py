@@ -4323,7 +4323,11 @@ class OpenAIHandlerMixin:
         from headroom.proxy.helpers import enforce_cache_breakpoint_budget
 
         _, optimized_messages, tools, _ = enforce_cache_breakpoint_budget(
-            None, optimized_messages, tools, client_messages=original_client_messages, request_id=request_id
+            None,
+            optimized_messages,
+            tools,
+            client_messages=original_client_messages,
+            request_id=request_id,
         )
 
         # Memory: inject context and tools for OpenAI requests.

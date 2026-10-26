@@ -107,3 +107,42 @@ def test_gateway_body_is_held_to_four_markers(headroom_client) -> None:
     )
     assert data["messages"] == out["messages"]
     assert "cache_breakpoint_budget" in data["transforms_applied"]
+
+
+def test_openai_chat_replayed_markers_capped_oldest_first() -> None:
+    # Issue #4471: a replayed frozen prefix keeps an old message-level marker
+    # and the message count differs from the client's, so the mirror step
+    # bails; the budget guard must still cap OpenAI chat shapes at four.
+    client = [
+        {"role": "system", "content": "s1", "cache_control": CC},
+        {"role": "system", "content": "s2", "cache_control": CC},
+        {"role": "user", "content": "read f1"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "r", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "f1 body", "cache_control": CC},
+    ]
+    tools = [{"type": "function", "function": {"name": "r"}, "cache_control": CC}]
+    replayed = [dict(m) for m in client]
+    replayed[3] = {
+        **replayed[3],
+        "tool_calls": [{**replayed[3]["tool_calls"][0], "cache_control": CC}],
+    }
+    replayed.insert(2, {"role": "user", "content": "earlier", "cache_control": CC})
+
+    assert count_cache_breakpoints(None, replayed, tools)["total"] == 6
+    _, messages, tools_out, stats = enforce_cache_breakpoint_budget(
+        None, replayed, tools, client_messages=client
+    )
+    assert stats["repaired"]
+    assert count_cache_breakpoints(None, messages, tools_out)["total"] <= 4
+    assert "cache_control" in messages[-1]
+
+
+def test_count_includes_tool_calls_markers() -> None:
+    msg = {"role": "assistant", "tool_calls": [{"id": "a", "cache_control": CC}]}
+    assert count_cache_breakpoints(None, [msg], None)["total"] == 1

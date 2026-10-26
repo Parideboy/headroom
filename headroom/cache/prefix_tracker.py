@@ -1115,71 +1115,14 @@ def mirror_client_message_cache_control(
     returned unchanged rather than guessing, and the breakpoint budget guard
     still bounds the total.
     """
-    # Align messages to client messages by identity (role + content equality),
-    # scanning from the tail, so a length mismatch (e.g. a replayed frozen
-    # prefix) does not cause us to bail. Unmatched messages have their
-    # message-level / tool_calls-level cache_control stripped.
-    if not isinstance(client_messages, list):
-        # Strip all message-level / tool_calls-level markers.
-        out = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                out.append(msg)
-                continue
-            new_msg = {k: v for k, v in msg.items() if k != "cache_control"}
-            calls = new_msg.get("tool_calls")
-            if isinstance(calls, list):
-                new_calls = [{k: v for k, v in c.items() if k != "cache_control"} if isinstance(c, dict) else c for c in calls]
-                if new_calls != calls:
-                    new_msg = {**new_msg, "tool_calls": new_calls}
-            out.append(new_msg)
-        return out
-
-    # Build tail-aligned index mapping.
-    n = len(messages)
-    m = len(client_messages)
-    mapping: dict[int, int] = {}
-    i = n - 1
-    j = m - 1
-    while i >= 0 and j >= 0:
-        msg = messages[i]
-        cli = client_messages[j]
-        if (
-            isinstance(msg, dict)
-            and isinstance(cli, dict)
-            and msg.get("role") == cli.get("role")
-            and msg.get("content") == cli.get("content")
-        ):
-            mapping[i] = j
-            i -= 1
-            j -= 1
-        else:
-            # advance the longer side
-            if n >= m:
-                i -= 1
-            else:
-                j -= 1
-    # fallback: if nothing matched, try simple positional for equal-ish
+    if not isinstance(client_messages, list) or len(client_messages) != len(messages):
+        return messages
     changed = False
-    out = []
-    for idx, msg in enumerate(messages):
+    out: list[dict[str, Any]] = []
+    for msg, client in zip(messages, client_messages):
         if not isinstance(msg, dict):
             out.append(msg)
             continue
-        client_idx = mapping.get(idx)
-        if client_idx is None:
-            # strip
-            new_msg = {k: v for k, v in msg.items() if k != "cache_control"}
-            calls = new_msg.get("tool_calls")
-            if isinstance(calls, list):
-                new_calls = [{k: v for k, v in c.items() if k != "cache_control"} if isinstance(c, dict) else c for c in calls]
-                if new_calls != calls:
-                    new_msg = {**new_msg, "tool_calls": new_calls}
-            if new_msg != msg:
-                changed = True
-            out.append(new_msg)
-            continue
-        client = client_messages[client_idx]
         new_msg, msg_changed = _mirror_marker(msg, client)
         calls = new_msg.get("tool_calls")
         client_calls = client.get("tool_calls") if isinstance(client, dict) else None
