@@ -34,7 +34,7 @@ class RedisBackend:
     def __init__(self, url: str, client: Any = None) -> None:
         self._client = client if client is not None else connect(url, setting="HEADROOM_REDIS_URL")
         self._prefix = f"{key_prefix()}:ccr:"
-        self._guard = Guard("CCR store")
+        self._guard = Guard("CCR store", "ccr")
 
     def _key(self, hash_key: str) -> str:
         return self._prefix + hash_key

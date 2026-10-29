@@ -82,7 +82,7 @@ class SharedSessions:
     def __init__(self, client: Any) -> None:
         self._client = client
         self._cas = client.register_script(_CAS)
-        self._guard = Guard("compress sessions")
+        self._guard = Guard("compress sessions", "compress_session")
         self._prefix = f"{key_prefix()}:session:"
 
     def fetch(

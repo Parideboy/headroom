@@ -1859,6 +1859,25 @@ class PrometheusMetrics:
                     )
                 lines.append("")
 
+            # Shared Redis store availability (lazy import: module must not
+            # require the redis package at import time).
+            from headroom.cache.redis_client import guards as _redis_guards
+
+            _gs = _redis_guards()
+            if _gs:
+                lines.extend(
+                    [
+                        "# HELP headroom_redis_available 1 when the shared Redis store answered its last call, 0 during an outage or backoff",
+                        "# TYPE headroom_redis_available gauge",
+                    ]
+                )
+                for _label in sorted(_gs):
+                    lines.append(
+                        f'headroom_redis_available{{feature="{_escape_label_value(_label)}"}}'
+                        f" {int(_gs[_label].available)}"
+                    )
+                lines.append("")
+
             # Unit 3: WS session lifecycle gauges + duration histogram.
             lines.extend(
                 [

@@ -12,6 +12,9 @@ Shared state is an optimisation of a request, never a condition for it: a Redis
 error is a miss, logged when it starts and when Redis is back, and Redis is not
 asked again for :data:`BACKOFF_SECONDS` after a connection failure, so an outage
 costs requests nothing but the sharing.
+
+Each :class:`Guard` registers itself in a module-level registry keyed by a short
+label; :func:`guards` exposes a snapshot for ``/health`` and ``/metrics``.
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ BACKOFF_SECONDS = 5.0
 TIMEOUT_SECONDS = 1.0
 
 T = TypeVar("T")
+
+#: Registry of live guards, keyed by their short label (last wins).
+_GUARDS: dict[str, Guard] = {}
+
+
+def guards() -> dict[str, Guard]:
+    """Snapshot of every registered :class:`Guard`, keyed by label."""
+    return dict(_GUARDS)
 
 
 def key_prefix() -> str:
@@ -77,9 +88,14 @@ class Guard:
     kind of call (``what``: read, write, ...) starts failing and when it works
     again; after a connection error Redis is skipped for :data:`BACKOFF_SECONDS`.
     Tracking each kind apart keeps a Redis that serves reads but refuses writes
-    (``maxmemory`` with ``noeviction``) from logging on every request."""
+    (``maxmemory`` with ``noeviction``) from logging on every request.
 
-    def __init__(self, feature: str) -> None:
+    ``label`` is a short stable key (``"ccr"``, ``"compress_session"``) used in
+    the module-level registry so ``/health`` and ``/metrics`` can report
+    availability without importing the ``redis`` package at module level.
+    """
+
+    def __init__(self, feature: str, label: str) -> None:
         import redis
 
         self._feature = feature
@@ -88,6 +104,12 @@ class Guard:
         self._lock = threading.Lock()
         self._skip_until = 0.0
         self._failing: set[str] = set()
+        _GUARDS[label] = self
+
+    @property
+    def available(self) -> bool:
+        """True when Redis answered its last call and no backoff is active."""
+        return time.monotonic() >= self._skip_until and not self._failing
 
     def call(self, what: str, fn: Callable[[], T], default: T) -> T:
         if time.monotonic() < self._skip_until:

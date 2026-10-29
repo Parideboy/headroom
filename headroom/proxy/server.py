@@ -3622,6 +3622,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         return True
 
     def _health_checks() -> dict[str, dict[str, Any]]:
+        from headroom.cache.redis_client import guards as _redis_guards
+
+        gs = _redis_guards()
         kompress_enabled = _reconcile_kompress_health()
         memory_status = (
             proxy.memory_handler.health_status()
@@ -3673,6 +3676,12 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 ready=proxy.warmup.kompress.status == "loaded",
                 optional=True,
                 backend=proxy.warmup.kompress.info.get("backend", None),
+            ),
+            "session_store": _component_health(
+                enabled=bool(gs),
+                ready=all(g.available for g in gs.values()),
+                optional=True,
+                features={k: g.available for k, g in sorted(gs.items())},
             ),
         }
 
@@ -3785,9 +3794,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
 
     def _health_payload(*, include_config: bool) -> dict[str, Any]:
         checks = _health_checks()
-        # Kompress is an optional soft component: model downloads lazily on
-        # first use, so "not ready" (cold cache) must not degrade overall health.
-        ready = all(check["ready"] for name, check in checks.items() if name != "kompress")
+        # Optional soft components (kompress, session_store) must not degrade
+        # overall health: a cold model cache or a Redis backoff is not a failure.
+        ready = all(
+            check["ready"]
+            for name, check in checks.items()
+            if name not in ("kompress", "session_store")
+        )
         payload: dict[str, Any] = {
             "service": "headroom-proxy",
             "status": "healthy" if ready else "unhealthy",
