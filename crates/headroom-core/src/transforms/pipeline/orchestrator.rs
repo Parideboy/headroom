@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn end_to_end_log_template_collapses_then_log_offload_can_run() {
-        // LogTemplate runs first (lossless reformat), then LogOffload
+        // LogTemplate runs first (token-preserving reformat), then LogOffload
         // sees the collapsed output and may further drop low-priority
         // lines. Both should appear in steps_applied if both fire.
         let cfg = PipelineConfig::default();

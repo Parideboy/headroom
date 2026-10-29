@@ -490,7 +490,7 @@ mod tests {
         }
         // These all share token-count and "event-" prefix is varying.
         // Similarity might trigger collapse — that's fine if it does
-        // (still token-level lossless), but we mainly assert no panic + no
+        // (still token-level preserving), but we mainly assert no panic + no
         // information loss.
         let r = reformat().apply(&log).expect("processes");
         // Either way: every variant value must survive.
