@@ -2435,6 +2435,17 @@ class HeadroomProxy(
         if self.memory_handler and hasattr(self.memory_handler, "close"):
             await self.memory_handler.close()
 
+        if self.shared_compress_sessions is not None:
+            with contextlib.suppress(Exception):
+                self.shared_compress_sessions.close()
+            self.shared_compress_sessions = None
+
+        # Detach the CCR store so its guard registration follows the store
+        # lifecycle (a Redis backend registers "ccr" in the module registry).
+        from headroom.cache.compression_store import detach_compression_store
+
+        detach_compression_store()
+
         with contextlib.suppress(Exception):
             from headroom.models.ml_models import MLModelRegistry
 
@@ -3625,6 +3636,16 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         from headroom.cache.redis_client import guards as _redis_guards
 
         gs = _redis_guards()
+        features = {k: g.state for k, g in sorted(gs.items())}
+        ccr_backend_env = (os.environ.get("HEADROOM_CCR_BACKEND") or "").strip().lower()
+        redis_url_env = (os.environ.get("HEADROOM_REDIS_URL") or "").strip()
+        session_store_env = (os.environ.get("HEADROOM_COMPRESS_SESSION_STORE") or "").strip()
+        if (
+            "ccr" not in features
+            and ccr_backend_env == "redis"
+            and (redis_url_env or session_store_env)
+        ):
+            features["ccr"] = "unknown"
         kompress_enabled = _reconcile_kompress_health()
         memory_status = (
             proxy.memory_handler.health_status()
@@ -3639,6 +3660,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         )
         memory_enabled = bool(memory_status.get("enabled", False))
         memory_initialized = bool(memory_status.get("initialized", False))
+        session_store_enabled = bool(features)
+        session_store_ready = session_store_enabled and all(
+            v == "available" for v in features.values()
+        )
         return {
             "startup": _component_health(
                 enabled=True,
@@ -3678,10 +3703,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 backend=proxy.warmup.kompress.info.get("backend", None),
             ),
             "session_store": _component_health(
-                enabled=bool(gs),
-                ready=all(g.available for g in gs.values()),
+                enabled=session_store_enabled,
+                ready=session_store_ready,
                 optional=True,
-                features={k: g.available for k, g in sorted(gs.items())},
+                features=features,
             ),
         }
 

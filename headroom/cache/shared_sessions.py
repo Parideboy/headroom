@@ -85,6 +85,17 @@ class SharedSessions:
         self._guard = Guard("compress sessions", "compress_session")
         self._prefix = f"{key_prefix()}:session:"
 
+    def close(self) -> None:
+        """Close the shared session store and unregister its guard."""
+        if hasattr(self, "_guard"):
+            self._guard.close()
+        client = getattr(self, "_client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def fetch(
         self, store: SessionTrackerStore, key: str, local: PrefixCacheTracker | None
     ) -> PrefixCacheTracker | None:

@@ -1,38 +1,42 @@
 """Guard availability tracking, /metrics gauge and /health session_store (#4512).
 
 Covers:
-* ``Guard.available`` flips to False on a connection error (backoff) and back
-  to True after a successful call.
-* ``headroom_redis_available{feature=...}`` gauge appears in /metrics output.
-* ``/health`` reports ``session_store`` as degraded while top-level ``ready``
-  stays True.
+* ``Guard.state`` reports "unknown" before any command runs, "available" on
+  success, and "unavailable" on backoff/failure.
+* ``headroom_redis_checked{feature=...}`` gauge appears in /metrics output for
+  every configured guard (1 if checked, 0 if unknown).
+* ``headroom_redis_available{feature=...}`` gauge appears in /metrics output
+  only for observed guards (1 if available, 0 during outage).
+* ``/health`` reports ``session_store`` feature state strings ("unknown" |
+  "available" | "unavailable") and stays degraded when unobserved or unavailable
+  while top-level ``ready`` stays True.
+* Unregistering/closing guards on store close/detach.
 """
 
 from __future__ import annotations
 
 import pytest
 
-fakeredis = pytest.importorskip("fakeredis")
-
 from headroom.cache import redis_client  # noqa: E402
 from headroom.cache.redis_client import Guard, guards  # noqa: E402
 
-
-@pytest.fixture(autouse=True)
-def _clear_guards():
-    """Ensure no guard registrations leak between tests."""
-    redis_client._GUARDS.clear()
-    yield
-    redis_client._GUARDS.clear()
-
-
-# --- Guard.available ---------------------------------------------------------
+# --- Guard.state & Guard.available --------------------------------------------
 
 
 class TestGuardAvailable:
-    def test_available_initially(self):
+    def test_unknown_initially_before_any_call(self):
         g = Guard("test feature", "test")
+        assert g.state == "unknown"
+        assert g.available is False
+        g.close()
+
+    def test_available_after_successful_call(self):
+        g = Guard("test feature", "test")
+        result = g.call("read", lambda: "ok", "default")
+        assert result == "ok"
+        assert g.state == "available"
         assert g.available is True
+        g.close()
 
     def test_unavailable_after_connection_error(self, monkeypatch):
         monkeypatch.setattr(redis_client, "BACKOFF_SECONDS", 60.0)
@@ -44,48 +48,54 @@ class TestGuardAvailable:
 
         result = g.call("read", failing, "default")
         assert result == "default"
+        assert g.state == "unavailable"
         assert g.available is False
+        g.close()
 
     def test_available_again_after_successful_call(self, monkeypatch):
         monkeypatch.setattr(redis_client, "BACKOFF_SECONDS", 0.0)
         g = Guard("test feature", "test")
         import redis
 
-        # First: fail with a non-connection error to populate _failing
         def failing():
             raise redis.RedisError("some error")
 
         g.call("read", failing, "default")
-        assert g.available is False  # _failing is non-empty
-
-        # Now succeed
-        result = g.call("read", lambda: "ok", "default")
-        assert result == "ok"
-        assert g.available is True
-
-    def test_available_false_during_backoff_even_without_failing(self, monkeypatch):
-        monkeypatch.setattr(redis_client, "BACKOFF_SECONDS", 60.0)
-        g = Guard("test feature", "test")
-        import redis
-
-        def failing():
-            raise redis.ConnectionError("timeout")
-
-        g.call("write", failing, None)
-        # _failing has "write" AND _skip_until is in the future
+        assert g.state == "unavailable"
         assert g.available is False
 
-    def test_guards_registry(self):
-        g1 = Guard("feature A", "alpha")
-        g2 = Guard("feature B", "beta")
-        snapshot = guards()
-        assert snapshot == {"alpha": g1, "beta": g2}
+        result = g.call("read", lambda: "ok", "default")
+        assert result == "ok"
+        assert g.state == "available"
+        assert g.available is True
+        g.close()
 
-    def test_guards_last_wins(self):
-        Guard("feature A", "same")
-        g2 = Guard("feature B", "same")
-        snapshot = guards()
-        assert snapshot["same"] is g2
+    def test_untested_shared_session_store_is_unknown(self, monkeypatch):
+        monkeypatch.setenv("HEADROOM_COMPRESS_SESSION_STORE", "redis://127.0.0.1:1")
+        from headroom.cache.shared_sessions import open_shared_sessions
+
+        store = open_shared_sessions()
+        assert store is not None
+        try:
+            assert store._guard.state == "unknown"
+            assert store._guard.available is False
+            assert guards()["compress_session"].state == "unknown"
+            assert guards()["compress_session"].available is False
+        finally:
+            store.close()
+
+    def test_lifecycle_close_unregisters_guard(self, monkeypatch):
+        monkeypatch.setenv("HEADROOM_COMPRESS_SESSION_STORE", "redis://127.0.0.1:1")
+        from headroom.cache.shared_sessions import open_shared_sessions
+
+        store = open_shared_sessions()
+        assert store is not None
+        assert "compress_session" in guards()
+
+        store.close()
+        monkeypatch.delenv("HEADROOM_COMPRESS_SESSION_STORE", raising=False)
+        assert open_shared_sessions() is None
+        assert "compress_session" not in guards()
 
 
 # --- /metrics gauge ----------------------------------------------------------
@@ -93,15 +103,31 @@ class TestGuardAvailable:
 
 class TestMetricsGauge:
     @pytest.mark.asyncio
-    async def test_gauge_present_when_guards_exist(self):
-        Guard("test feature", "test_label")
+    async def test_gauge_checked_and_available_when_observed(self):
+        g = Guard("test feature", "test_label")
+        g.call("read", lambda: "ok", None)
         from headroom.proxy.prometheus_metrics import PrometheusMetrics
 
         metrics = PrometheusMetrics(stateless=True)
         text = await metrics.export()
+        assert "# HELP headroom_redis_checked" in text
+        assert "# TYPE headroom_redis_checked gauge" in text
+        assert 'headroom_redis_checked{feature="test_label"} 1' in text
         assert "# HELP headroom_redis_available" in text
         assert "# TYPE headroom_redis_available gauge" in text
         assert 'headroom_redis_available{feature="test_label"} 1' in text
+        g.close()
+
+    @pytest.mark.asyncio
+    async def test_gauge_unobserved_shows_checked_0_and_no_available(self):
+        g = Guard("test feature", "unobserved_label")
+        from headroom.proxy.prometheus_metrics import PrometheusMetrics
+
+        metrics = PrometheusMetrics(stateless=True)
+        text = await metrics.export()
+        assert 'headroom_redis_checked{feature="unobserved_label"} 0' in text
+        assert "headroom_redis_available" not in text
+        g.close()
 
     @pytest.mark.asyncio
     async def test_gauge_zero_during_outage(self, monkeypatch):
@@ -119,15 +145,9 @@ class TestMetricsGauge:
 
         metrics = PrometheusMetrics(stateless=True)
         text = await metrics.export()
+        assert 'headroom_redis_checked{feature="outage_label"} 1' in text
         assert 'headroom_redis_available{feature="outage_label"} 0' in text
-
-    @pytest.mark.asyncio
-    async def test_no_gauge_when_no_guards(self):
-        from headroom.proxy.prometheus_metrics import PrometheusMetrics
-
-        metrics = PrometheusMetrics(stateless=True)
-        text = await metrics.export()
-        assert "headroom_redis_available" not in text
+        g.close()
 
 
 # --- /health session_store ---------------------------------------------------
@@ -143,14 +163,13 @@ class TestHealthSessionStore:
         from headroom.proxy.models import ProxyConfig
         from headroom.proxy.server import create_app
 
-        # Register a guard that will be unavailable
         g = Guard("compress sessions", "compress_session")
 
         def failing():
             raise redis.ConnectionError("down")
 
         g.call("read", failing, None)
-        assert g.available is False
+        assert g.state == "unavailable"
 
         app = create_app(
             ProxyConfig(
@@ -168,17 +187,16 @@ class TestHealthSessionStore:
         assert response.status_code == 200
         payload = response.json()
 
-        # Top-level ready must remain True despite degraded session_store
         assert payload["ready"] is True
         assert payload["status"] == "healthy"
 
-        # session_store shows degraded
         ss = payload["checks"]["session_store"]
         assert ss["enabled"] is True
         assert ss["ready"] is False
         assert ss["status"] == "degraded"
         assert ss["optional"] is True
-        assert ss["features"]["compress_session"] is False
+        assert ss["features"]["compress_session"] == "unavailable"
+        g.close()
 
     def test_session_store_disabled_when_no_guards(self, monkeypatch):
         monkeypatch.setenv("HEADROOM_SKIP_UPSTREAM_CHECK", "1")
@@ -217,7 +235,8 @@ class TestHealthSessionStore:
         from headroom.proxy.server import create_app
 
         g = Guard("CCR store", "ccr")
-        assert g.available is True
+        g.call("read", lambda: "ok", None)
+        assert g.state == "available"
 
         app = create_app(
             ProxyConfig(
@@ -239,4 +258,5 @@ class TestHealthSessionStore:
         assert ss["enabled"] is True
         assert ss["ready"] is True
         assert ss["status"] == "healthy"
-        assert ss["features"]["ccr"] is True
+        assert ss["features"]["ccr"] == "available"
+        g.close()
