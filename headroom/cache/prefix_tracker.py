@@ -1235,6 +1235,15 @@ class PrefixCacheTracker:
         self._tokens_preserved: int = 0
         self._compression_foregone_tokens: int = 0
 
+        # Sticky reasoning-drop floor (#4548): on a cold turn the OpenAI reasoning
+        # compactor drops non-kept prior turns outright (safe — the cold turn
+        # re-caches from scratch). The next warm turn must DROP those same turns
+        # again instead of re-Kompressing them, or the forwarded prefix no longer
+        # matches the cached cold-turn prefix and the cache misses. This is the
+        # highest assistant ordinal dropped + 1, i.e. the count of leading
+        # non-kept turns to keep dropped on subsequent warm turns.
+        self.reasoning_drop_upto: int = 0
+
     def get_frozen_message_count(self) -> int:
         """How many leading messages to skip compression on the next turn.
 
