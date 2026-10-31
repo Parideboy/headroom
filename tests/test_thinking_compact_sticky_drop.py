@@ -65,3 +65,49 @@ def test_inline_think_spans_stay_dropped():
     )
     assert out[1]["content"] == "a0"
     assert out[3]["content"] == think + "a1"
+
+
+def _tracker_with_floor(floor):
+    from headroom.cache.prefix_tracker import PrefixCacheTracker
+
+    tracker = PrefixCacheTracker("openai")
+    tracker.update_from_response(cache_read_tokens=0, cache_write_tokens=0, messages=[])
+    tracker.reasoning_drop_upto = floor
+    return tracker
+
+
+def test_floor_survives_shared_round_trip_and_warm_prefix_matches():
+    from headroom.cache.prefix_tracker import SessionTrackerStore
+
+    cold, stats = compact_reasoning_openai_chat(
+        _history(3, "r"), kompress=None, keep_last_turns=1, drop=True
+    )
+    store = SessionTrackerStore()
+    meta, table = store.encode_shared("k", _tracker_with_floor(stats["dropped_upto"]))
+    restored = store.decode_shared(meta, table)
+    assert restored.reasoning_drop_upto == 2
+    warm, _ = compact_reasoning_openai_chat(
+        _history(4, "r"),
+        kompress=_HalfKompress(),
+        keep_last_turns=1,
+        drop_first_turns=restored.reasoning_drop_upto,
+    )
+    assert warm[:4] == cold[:4]
+
+
+def test_old_metadata_without_floor_decodes_to_zero():
+    from headroom.cache.prefix_tracker import SessionTrackerStore
+
+    store = SessionTrackerStore()
+    meta, table = store.encode_shared("k", _tracker_with_floor(3))
+    meta["state"] = meta["state"][:5]
+    meta["turns"] = [[t, s[:5]] for t, s in meta["turns"]]
+    assert store.decode_shared(meta, table).reasoning_drop_upto == 0
+
+
+def test_resumed_turn_restores_its_own_floor():
+    tracker = _tracker_with_floor(2)
+    tracker._turn_states[1] = tracker._turn_state()
+    tracker.reasoning_drop_upto = 3  # a cold fork raised it
+    tracker._resume_turn(1)
+    assert tracker.reasoning_drop_upto == 2
