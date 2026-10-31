@@ -268,7 +268,7 @@ class TestHealthSessionStore:
 class TestCCRStoreSurvivesProxyShutdown:
     @pytest.mark.asyncio
     async def test_ccr_store_persists_across_proxy_shutdown(self, monkeypatch):
-        monkeypatch.setenv('HEADROOM_SKIP_UPSTREAM_CHECK', '1')
+        monkeypatch.setenv("HEADROOM_SKIP_UPSTREAM_CHECK", "1")
         from headroom.cache.compression_store import (
             get_compression_store,
             reset_compression_store,
@@ -287,7 +287,8 @@ class TestCCRStoreSurvivesProxyShutdown:
             )
             app1.state.ready = True
             proxy1 = app1.state.proxy
-            proxy1.http_client = object()
+            proxy1.http_client = None
+            proxy1.http_client_h1 = None
 
             store = get_compression_store()
             original_hash = store.store(
@@ -295,7 +296,7 @@ class TestCCRStoreSurvivesProxyShutdown:
                 compressed='{"data": "[COMPRESSED:abc123]"}',
                 original_tokens=10,
                 compressed_tokens=2,
-                tool_name='test_tool',
+                tool_name="test_tool",
             )
             entry_before = store.retrieve(original_hash)
             assert entry_before is not None
@@ -310,4 +311,3 @@ class TestCCRStoreSurvivesProxyShutdown:
             assert entry_after.original_content == '{"data": "hello"}'
         finally:
             reset_compression_store()
-
