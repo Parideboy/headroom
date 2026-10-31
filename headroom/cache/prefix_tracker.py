@@ -1336,6 +1336,7 @@ class PrefixCacheTracker:
             self._cached_message_count,
             self._last_original_messages,
             self._last_forwarded_messages,
+            self.reasoning_drop_upto,
         )
 
     def _request_turn_state(self) -> tuple[Any, ...]:
@@ -1367,13 +1368,23 @@ class PrefixCacheTracker:
         """
         state = self._turn_states.get(turn) if turn is not None else None
         if state is not None:
-            (
-                self._turn_number,
-                self._cached_token_count,
-                self._cached_message_count,
-                self._last_original_messages,
-                self._last_forwarded_messages,
-            ) = state
+            if len(state) >= 6:
+                (
+                    self._turn_number,
+                    self._cached_token_count,
+                    self._cached_message_count,
+                    self._last_original_messages,
+                    self._last_forwarded_messages,
+                    self.reasoning_drop_upto,
+                ) = state
+            else:
+                (
+                    self._turn_number,
+                    self._cached_token_count,
+                    self._cached_message_count,
+                    self._last_original_messages,
+                    self._last_forwarded_messages,
+                ) = state
 
     def record_returned(
         self,
@@ -1680,13 +1691,18 @@ def _deref(table: list[Any], refs: list[int]) -> list[Any]:
 
 
 def _decode_turn_state(table: list[Any], state: list[Any]) -> tuple[Any, ...]:
-    turn, cached_tokens, cached_messages, original, forwarded = state
+    if len(state) >= 6:
+        turn, cached_tokens, cached_messages, original, forwarded, drop_upto = state
+    else:
+        turn, cached_tokens, cached_messages, original, forwarded = state
+        drop_upto = 0
     return (
         int(turn),
         int(cached_tokens),
         int(cached_messages),
         _deref(table, original),
         _deref(table, forwarded),
+        int(drop_upto),
     )
 
 
@@ -2201,7 +2217,7 @@ class SessionTrackerStore:
             return memo[id(messages)]
 
         def state(s: tuple[Any, ...]) -> list[Any]:
-            return [s[0], s[1], s[2], ref(s[3]), ref(s[4])]
+            return [s[0], s[1], s[2], ref(s[3]), ref(s[4]), s[5] if len(s) > 5 else 0]
 
         maturation = tracker.read_maturation_manager
         meta = {
@@ -2215,6 +2231,7 @@ class SessionTrackerStore:
             "turns": [[t, state(s)] for t, s in tracker._turn_states.items() if s is not None],
             "history": [[ref(snap), t] for snap, t in self._lineage_history.get(key, ())],
             "maturation": None if maturation is None else maturation.export_state(),
+            "reasoning_drop_upto": tracker.reasoning_drop_upto,
         }
         return meta, list(index)
 
@@ -2273,8 +2290,12 @@ class SessionTrackerStore:
             tracker._cached_message_count,
             tracker._last_original_messages,
             tracker._last_forwarded_messages,
+            tracker.reasoning_drop_upto,
         ) = _decode_turn_state(table, meta["state"])
         tracker._turn_states = {int(t): _decode_turn_state(table, s) for t, s in meta["turns"]}
+        tracker.reasoning_drop_upto = int(
+            meta.get("reasoning_drop_upto", tracker.reasoning_drop_upto)
+        )
         tracker.restored_from_disk = True
         if meta["maturation"] is not None:
             from headroom.transforms.read_maturation import ReadMaturationManager
