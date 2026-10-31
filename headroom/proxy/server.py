@@ -2440,12 +2440,6 @@ class HeadroomProxy(
                 self.shared_compress_sessions.close()
             self.shared_compress_sessions = None
 
-        # Detach the CCR store so its guard registration follows the store
-        # lifecycle (a Redis backend registers "ccr" in the module registry).
-        from headroom.cache.compression_store import detach_compression_store
-
-        detach_compression_store()
-
         with contextlib.suppress(Exception):
             from headroom.models.ml_models import MLModelRegistry
 

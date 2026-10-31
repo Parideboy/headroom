@@ -260,3 +260,54 @@ class TestHealthSessionStore:
         assert ss["status"] == "healthy"
         assert ss["features"]["ccr"] == "available"
         g.close()
+
+
+# --- CCR store lifecycle across proxy shutdown -------------------------------
+
+
+class TestCCRStoreSurvivesProxyShutdown:
+    @pytest.mark.asyncio
+    async def test_ccr_store_persists_across_proxy_shutdown(self, monkeypatch):
+        monkeypatch.setenv('HEADROOM_SKIP_UPSTREAM_CHECK', '1')
+        from headroom.cache.compression_store import (
+            get_compression_store,
+            reset_compression_store,
+        )
+        from headroom.proxy.models import ProxyConfig
+        from headroom.proxy.server import create_app
+
+        reset_compression_store()
+        try:
+            app1 = create_app(
+                ProxyConfig(
+                    optimize=False,
+                    cache_enabled=False,
+                    rate_limit_enabled=False,
+                )
+            )
+            app1.state.ready = True
+            proxy1 = app1.state.proxy
+            proxy1.http_client = object()
+
+            store = get_compression_store()
+            original_hash = store.store(
+                original='{"data": "hello"}',
+                compressed='{"data": "[COMPRESSED:abc123]"}',
+                original_tokens=10,
+                compressed_tokens=2,
+                tool_name='test_tool',
+            )
+            entry_before = store.retrieve(original_hash)
+            assert entry_before is not None
+            assert entry_before.original_content == '{"data": "hello"}'
+
+            await proxy1.shutdown()
+
+            store_after = get_compression_store()
+            assert store_after is store
+            entry_after = store_after.retrieve(original_hash)
+            assert entry_after is not None
+            assert entry_after.original_content == '{"data": "hello"}'
+        finally:
+            reset_compression_store()
+
